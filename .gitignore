@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+data/registry/
+data/graph_data.json
+.DS_Store
