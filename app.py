@@ -7,6 +7,7 @@ Aplicación Streamlit para análisis de grafo social de Instagram.
 import streamlit as st
 import json
 import pandas as pd
+import tempfile
 from pathlib import Path
 
 from pipeline.ingestion import (
@@ -25,6 +26,12 @@ from pipeline.ingestion import (
     INC_FOLLOWERS_PATH,
 )
 from pipeline.graph_builder import build_graph, compute_metrics, graph_to_sigma_format
+from pipeline.analysis import (
+    build_analysis_dataframe,
+    get_node_profile,
+    get_components_info,
+    compute_global_metrics,
+)
 from viz.renderer import build_sigma_html
 
 # ── Migración de versión (una sola vez por arranque) ─────────────────────────
@@ -146,6 +153,16 @@ def get_graph_metrics(only_course: bool):
     return G, metrics, sigma_data
 
 
+@st.cache_data(ttl=5)
+def get_analysis_data():
+    G = build_graph(only_course_nodes=False)
+    course_nodes = {n for n, d in G.nodes(data=True) if d.get("has_file")}
+    df = build_analysis_dataframe(G, course_nodes)
+    global_m = compute_global_metrics(G)
+    components = get_components_info(G, course_nodes)
+    return G, df, global_m, components, course_nodes
+
+
 def status_icon(status: str) -> str:
     return {"added": "✅", "duplicate": "⚠️", "error": "❌", "anonymous": "🔵"}.get(status, "•")
 
@@ -156,32 +173,31 @@ with st.sidebar:
     st.markdown("# 🕸️ Social Graph")
 
     # ── 1. Upload emparejado ─────────────────────────────────────────────────
-    st.markdown("<div class='section-label'>Subir archivos</div>", unsafe_allow_html=True)
-
-    with st.form("upload_form", clear_on_submit=True):
-        username_input = st.text_input(
-            "👤 Username de Instagram",
-            placeholder="ej: jorge_mercado12a",
-            help="Requerido. Debe coincidir con tu usuario real de Instagram.",
-        )
-
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            following_file = st.file_uploader(
-                "📤 following.json",
-                type=["json"],
-                key="following_upload",
-                help="Exportado desde Instagram → Configuración → Tu actividad → Descargar tu información",
-            )
-        with col_f2:
-            followers_file = st.file_uploader(
-                "📤 followers*.json",
-                type=["json"],
-                key="followers_upload",
-                help="Puede llamarse followers_1.json u otro nombre que comience con 'followers'",
+    with st.expander("⬆️ Subir archivos", expanded=False):
+        with st.form("upload_form", clear_on_submit=True):
+            username_input = st.text_input(
+                "👤 Username de Instagram",
+                placeholder="ej: tu_usuario",
+                help="Requerido. Debe coincidir con tu usuario real de Instagram.",
             )
 
-        submitted = st.form_submit_button("⬆️ Subir", use_container_width=True)
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                following_file = st.file_uploader(
+                    "📤 following.json",
+                    type=["json"],
+                    key="following_upload",
+                    help="Exportado desde Instagram → Configuración → Tu actividad → Descargar tu información",
+                )
+            with col_f2:
+                followers_file = st.file_uploader(
+                    "📤 followers*.json",
+                    type=["json"],
+                    key="followers_upload",
+                    help="Puede llamarse followers_1.json u otro nombre que comience con 'followers'",
+                )
+
+            submitted = st.form_submit_button("⬆️ Subir", width="stretch")
 
     if submitted:
         username_clean = username_input.strip().lower() if username_input else ""
@@ -238,7 +254,7 @@ with st.sidebar:
             "`data/incompleto/following/` y `data/incompleto/followers/` — archivos incompletos\n\n"
             "Nombra como `following_username.json` para auto-detectar el owner."
         )
-        if st.button("🔄 Escanear carpetas", use_container_width=True):
+        if st.button("🔄 Escanear carpetas", width="stretch"):
             with st.spinner("Escaneando..."):
                 results = scan_local_folder()
             if not results:
@@ -290,27 +306,17 @@ with st.sidebar:
                     "Fecha": meta.get("ingested_at", "—")[:10],
                     "Inferido": "Sí" if meta.get("inferred_owner") else "No",
                 })
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     st.divider()
 
-    # ── 5. Opciones del grafo ─────────────────────────────────────────────────
-    st.markdown("<div class='section-label'>Opciones del grafo</div>", unsafe_allow_html=True)
-    only_course = st.toggle(
-        "Solo nodos del curso",
-        value=False,
-        help="Filtra para mostrar únicamente personas que subieron su archivo",
-    )
-
-    st.divider()
-
-    # ── 6. Zona peligrosa ─────────────────────────────────────────────────────
+    # ── 5. Zona peligrosa ─────────────────────────────────────────────────────
     with st.expander("⚠️ Zona peligrosa", expanded=False):
         st.caption(
             "Esto borra **todos** los datos: registry, grafo, y archivos en raw/ e incompleto/. "
             "No se puede deshacer."
         )
-        if st.button("🗑️ Reset completo", use_container_width=True, type="primary"):
+        if st.button("🗑️ Reset completo", width="stretch", type="primary"):
             reset_all_data()
             # Write version file so we don't auto-reset on next load
             VERSION_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -347,40 +353,41 @@ if anon_files:
         "Se resolverán automáticamente al procesar más archivos, o súbelos de nuevo declarando el username."
     )
 
-# Cargar grafo y métricas
-G, metrics, sigma_data = get_graph_metrics(only_course)
-gm = metrics["global"]
-per_node = metrics["per_node"]
+# ── Pestañas principales ──────────────────────────────────────────────────────
+tab_grafo, tab_analisis = st.tabs(["Grafo", "Análisis"])
 
-# ── Métricas globales ─────────────────────────────────────────────────────────
-st.markdown("## Grafo del curso")
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Nodos totales", gm.get("node_count", 0))
-col2.metric("Nodos del curso", gm.get("course_node_count", 0))
-col3.metric("Conexiones", gm.get("edge_count", 0))
-col4.metric("Comunidades", gm.get("community_count", 0))
-col5.metric("Densidad", gm.get("density", 0))
+# ════════════════════════════════════════════════════════════════════════════
+# PESTAÑA 1 — GRAFO
+# ════════════════════════════════════════════════════════════════════════════
+with tab_grafo:
+    G, metrics, sigma_data = get_graph_metrics(False)
+    gm = metrics["global"]
+    per_node = metrics["per_node"]
 
-st.divider()
+    st.markdown("## Grafo del curso")
 
-# ── Grafo Sigma ───────────────────────────────────────────────────────────────
-st.markdown(
-    "<div class='section-label'>Visualización interactiva · Haz clic en un nodo para ver sus métricas</div>",
-    unsafe_allow_html=True,
-)
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Nodos totales", gm.get("node_count", 0))
+    col2.metric("Nodos del curso", gm.get("course_node_count", 0))
+    col3.metric("Conexiones", gm.get("edge_count", 0))
+    col4.metric("Comunidades", gm.get("community_count", 0))
+    col5.metric("Densidad", gm.get("density", 0))
 
-sigma_html = build_sigma_html(sigma_data, height=680)
-st.components.v1.html(sigma_html, height=680, scrolling=False)
+    st.divider()
 
-st.divider()
+    st.markdown(
+        "<div class='section-label'>Visualización interactiva · Haz clic en un nodo para ver sus métricas</div>",
+        unsafe_allow_html=True,
+    )
 
-# ── Tabla de métricas por nodo ────────────────────────────────────────────────
-st.markdown("### Ranking de nodos")
+    sigma_html = build_sigma_html(sigma_data, height=680)
+    st.components.v1.html(sigma_html, height=680, scrolling=False)
 
-tab1, tab2 = st.tabs(["📊 Métricas completas", "🏆 Rankings"])
+    st.divider()
 
-with tab1:
+    st.markdown("<div class='section-label'>Dataset de nodos</div>", unsafe_allow_html=True)
+
     rows = []
     for username, m in per_node.items():
         rows.append({
@@ -397,40 +404,257 @@ with tab1:
             "Comunidad": m["community"],
         })
 
-    df = pd.DataFrame(rows).sort_values("PageRank", ascending=False)
-    st.dataframe(df, hide_index=True, use_container_width=True, height=400)
+    df_full = pd.DataFrame(rows).sort_values("PageRank", ascending=False)
+    st.dataframe(df_full, hide_index=True, width="stretch", height=400)
 
-with tab2:
-    r1, r2, r3 = st.columns(3)
+    if anon_files:
+        st.divider()
+        with st.expander(f"Ver {len(anon_files)} archivo(s) anónimos pendientes"):
+            for af in anon_files:
+                label = af.get("assigned_owner", "—")
+                st.markdown(
+                    f"- `{af['file_type']}` · {len(af['relations'])} relaciones · "
+                    f"asignado como `@{label}` · fuente: `{af['source_name']}`"
+                )
 
-    with r1:
-        st.markdown("**🔝 Más seguidos (in-degree)**")
-        top_in = sorted(per_node.items(), key=lambda x: x[1]["in_degree"], reverse=True)[:10]
-        for i, (u, m) in enumerate(top_in, 1):
-            badge = "🎓" if m["has_file"] else "·"
-            st.markdown(f"`{i:02d}` {badge} **@{u}** — {m['in_degree']}")
 
-    with r2:
-        st.markdown("**🔗 Mayor betweenness**")
-        top_btw = sorted(per_node.items(), key=lambda x: x[1]["betweenness"], reverse=True)[:10]
-        for i, (u, m) in enumerate(top_btw, 1):
-            badge = "🎓" if m["has_file"] else "·"
-            st.markdown(f"`{i:02d}` {badge} **@{u}** — {m['betweenness']:.4f}")
+# ════════════════════════════════════════════════════════════════════════════
+# PESTAÑA 2 — ANÁLISIS
+# ════════════════════════════════════════════════════════════════════════════
+with tab_analisis:
+    G_a, df_a, global_m, components, course_nodes = get_analysis_data()
 
-    with r3:
-        st.markdown("**🤝 Más conexiones mutuas**")
-        top_mut = sorted(per_node.items(), key=lambda x: x[1]["mutual_count"], reverse=True)[:10]
-        for i, (u, m) in enumerate(top_mut, 1):
-            badge = "🎓" if m["has_file"] else "·"
-            st.markdown(f"`{i:02d}` {badge} **@{u}** — {m['mutual_count']}")
+    st.markdown("## Análisis estructural")
+    st.markdown(
+        "<div class='section-label'>Enfocado en las 11 personas del curso · nodos externos aparecen si son estructuralmente relevantes</div>",
+        unsafe_allow_html=True,
+    )
 
-# ── Archivos anónimos pendientes ──────────────────────────────────────────────
-if anon_files:
+    # ── Métricas globales ─────────────────────────────────────────────────────
+    st.markdown("### Grafo completo")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Nodos", global_m["node_count"])
+    c2.metric("Arcos", global_m["edge_count"])
+    c3.metric("Densidad", global_m["density"],
+              help="Fracción de conexiones posibles que realmente existen. 0 = desconectado, 1 = todos conectados con todos.")
+    c4.metric("Reciprocidad", global_m["reciprocity"],
+              help="Fracción de arcos que tienen contrapartida (A→B y B→A). Indica cuántas relaciones son mutuas.")
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Componentes", global_m["weakly_connected_components"],
+              help="Grupos de nodos sin conexión entre sí.")
+    c6.metric("Componente principal", global_m["main_component_size"],
+              help="Cantidad de nodos en el grupo conectado más grande.")
+    c7.metric("Diámetro", global_m["diameter"] if global_m["diameter"] is not None else "—",
+              help="Mayor distancia mínima entre dos nodos de la componente principal.")
+    c8.metric("Camino promedio", global_m["avg_shortest_path"] if global_m["avg_shortest_path"] is not None else "—",
+              help="Promedio de la distancia mínima entre todos los pares de nodos.")
+
     st.divider()
-    with st.expander(f"Ver {len(anon_files)} archivo(s) anónimos pendientes"):
-        for af in anon_files:
-            label = af.get("assigned_owner", "—")
-            st.markdown(
-                f"- `{af['file_type']}` · {len(af['relations'])} relaciones · "
-                f"asignado como `@{label}` · fuente: `{af['source_name']}`"
-            )
+
+    # ── Ranking de métricas ───────────────────────────────────────────────────
+    st.markdown("### Rankings por métrica")
+
+    col_metric_sel, col_scope_sel = st.columns([2, 1])
+    with col_metric_sel:
+        metric_choice = st.selectbox(
+            "Ordenar por",
+            options=["pagerank", "betweenness", "in_degree", "out_degree",
+                     "degree_centrality", "closeness", "reciprocity", "clustering", "mutual_count"],
+            format_func=lambda x: {
+                "pagerank":          "PageRank — influencia ponderada",
+                "betweenness":       "Betweenness — nodos puente",
+                "in_degree":         "In-degree — más seguidos",
+                "out_degree":        "Out-degree — más activos siguiendo",
+                "degree_centrality": "Degree centrality — conectividad global",
+                "closeness":         "Closeness — cercanía a todos",
+                "reciprocity":       "Reciprocidad — relaciones mutuas",
+                "clustering":        "Clustering — vecindad cerrada",
+                "mutual_count":      "Mutuos — follows recíprocos",
+            }[x],
+        )
+    with col_scope_sel:
+        show_scope = st.radio(
+            "Mostrar",
+            options=["Solo curso", "Top 20 global"],
+            horizontal=True,
+        )
+
+    if show_scope == "Solo curso":
+        df_ranked = df_a[df_a["en_curso"]].sort_values(metric_choice, ascending=False).reset_index(drop=True)
+    else:
+        df_ranked = df_a.sort_values(metric_choice, ascending=False).head(20).reset_index(drop=True)
+
+    # Añadir columna de rango y etiqueta de curso
+    df_display = df_ranked.copy()
+    df_display.insert(0, "#", range(1, len(df_display) + 1))
+    df_display["en_curso"] = df_display["en_curso"].map({True: "✓", False: ""})
+    df_display = df_display.rename(columns={
+        "usuario": "Usuario",
+        "en_curso": "Curso",
+        "in_degree": "In",
+        "out_degree": "Out",
+        "degree_centrality": "Degree C.",
+        "betweenness": "Betweenness",
+        "pagerank": "PageRank",
+        "closeness": "Closeness",
+        "clustering": "Clustering",
+        "reciprocity": "Reciprocidad",
+        "mutual_count": "Mutuos",
+    })
+
+    st.dataframe(
+        df_display,
+        hide_index=True,
+        width="stretch",
+        height=380,
+        column_config={
+            "PageRank":    st.column_config.ProgressColumn("PageRank", min_value=0, max_value=float(df_a["pagerank"].max() or 1), format="%.5f"),
+            "Betweenness": st.column_config.ProgressColumn("Betweenness", min_value=0, max_value=float(df_a["betweenness"].max() or 1), format="%.4f"),
+        },
+    )
+
+    st.divider()
+
+    # ── Comparativa visual del curso ─────────────────────────────────────────
+    st.markdown("### Comparativa de personas del curso")
+
+    df_course = df_a[df_a["en_curso"]].sort_values("pagerank", ascending=False).copy()
+
+    chart_metric = st.selectbox(
+        "Métrica a visualizar",
+        options=["pagerank", "betweenness", "in_degree", "out_degree",
+                 "degree_centrality", "closeness", "reciprocity", "mutual_count"],
+        format_func=lambda x: {
+            "pagerank":          "PageRank",
+            "betweenness":       "Betweenness",
+            "in_degree":         "In-degree (seguidores)",
+            "out_degree":        "Out-degree (siguiendo)",
+            "degree_centrality": "Degree Centrality",
+            "closeness":         "Closeness",
+            "reciprocity":       "Reciprocidad",
+            "mutual_count":      "Conexiones mutuas",
+        }[x],
+        key="chart_metric",
+    )
+
+    chart_df = df_course[["usuario", chart_metric]].sort_values(chart_metric, ascending=False)
+    chart_df = chart_df.rename(columns={"usuario": "index"}).set_index("index")
+    st.bar_chart(chart_df, height=280)
+
+    st.divider()
+
+    # ── Componentes conectadas ───────────────────────────────────────────────
+    st.markdown("### Componentes conectadas")
+
+    for comp in components:
+        size = comp["size"]
+        c_count = comp["course_count"]
+        label = f"Componente {comp['id'] + 1} — {size} nodos"
+        if c_count:
+            label += f" ({c_count} del curso)"
+
+        with st.expander(label, expanded=(comp["id"] == 0)):
+            if comp["course_nodes"]:
+                st.markdown(
+                    "**Personas del curso:** " +
+                    " · ".join(f"`@{n}`" for n in sorted(comp["course_nodes"]))
+                )
+            else:
+                st.caption("Ninguna persona del curso en esta componente.")
+            st.caption(f"Total nodos: {size}")
+
+    st.divider()
+
+    # ── Perfil individual ─────────────────────────────────────────────────────
+    st.markdown("### Perfil individual")
+
+    course_list = sorted(course_nodes)
+    selected_user = st.selectbox(
+        "Selecciona una persona del curso",
+        options=course_list,
+        format_func=lambda x: f"@{x}",
+    )
+
+    if selected_user:
+        profile = get_node_profile(G_a, selected_user, df_a)
+        m = profile.get("metrics", {})
+
+        st.markdown(f"#### @{selected_user}")
+
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Seguidores (in)", m.get("in_degree", "—"))
+        p2.metric("Siguiendo (out)", m.get("out_degree", "—"))
+        p3.metric("Mutuos", m.get("mutual_count", "—"))
+        p4.metric("Reciprocidad", m.get("reciprocity", "—"))
+
+        p5, p6, p7, p8 = st.columns(4)
+        p5.metric("PageRank", m.get("pagerank", "—"),
+                  help="Importancia según la calidad de quién te sigue.")
+        p6.metric("Betweenness", m.get("betweenness", "—"),
+                  help="Fracción de caminos más cortos que pasan por este nodo.")
+        p7.metric("Closeness", m.get("closeness", "—"),
+                  help="Qué tan cerca está de todos los demás en promedio.")
+        p8.metric("Clustering", m.get("clustering", "—"),
+                  help="Qué tan interconectados están sus vecinos.")
+
+        # Rangos dentro del curso
+        df_course_ranked = df_a[df_a["en_curso"]].copy()
+        total_course = len(df_course_ranked)
+
+        def rank_in_course(col):
+            ranked = df_course_ranked.sort_values(col, ascending=False).reset_index(drop=True)
+            idx = ranked[ranked["usuario"] == selected_user].index
+            return int(idx[0]) + 1 if len(idx) else "—"
+
+        st.markdown("**Posición dentro del curso:**")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("PageRank", f"#{rank_in_course('pagerank')} / {total_course}")
+        r2.metric("Betweenness", f"#{rank_in_course('betweenness')} / {total_course}")
+        r3.metric("In-degree", f"#{rank_in_course('in_degree')} / {total_course}")
+        r4.metric("Out-degree", f"#{rank_in_course('out_degree')} / {total_course}")
+
+        st.divider()
+
+        # Conexiones
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            follows = profile.get("follows", [])
+            st.markdown(f"**Sigue a** ({len(follows)} usuarios)")
+            course_follows = [f for f in follows if f in course_nodes]
+            ext_follows = [f for f in follows if f not in course_nodes]
+            if course_follows:
+                st.caption("Del curso:")
+                st.markdown(" · ".join(f"`@{u}`" for u in sorted(course_follows)))
+            if ext_follows:
+                with st.expander(f"Externos ({len(ext_follows)})", expanded=False):
+                    st.markdown(
+                        "\n".join(f"- @{u}" for u in sorted(ext_follows)[:50])
+                    )
+
+        with col_right:
+            followers = profile.get("followers", [])
+            st.markdown(f"**Seguido por** ({len(followers)} usuarios)")
+            course_followers = [f for f in followers if f in course_nodes]
+            ext_followers = [f for f in followers if f not in course_nodes]
+            if course_followers:
+                st.caption("Del curso:")
+                st.markdown(" · ".join(f"`@{u}`" for u in sorted(course_followers)))
+            if ext_followers:
+                with st.expander(f"Externos ({len(ext_followers)})", expanded=False):
+                    st.markdown(
+                        "\n".join(f"- @{u}" for u in sorted(ext_followers)[:50])
+                    )
+
+        # Nodos puente relacionados
+        bridge_nodes = profile.get("bridge_nodes", [])
+        if bridge_nodes:
+            st.divider()
+            st.markdown("**Nodos puente en su vecindad** (vecinos con mayor betweenness)")
+            bcols = st.columns(min(len(bridge_nodes), 5))
+            for i, (bnode, bval) in enumerate(bridge_nodes):
+                with bcols[i]:
+                    badge = "Curso" if bnode in course_nodes else "Externo"
+                    st.metric(f"@{bnode}", f"{bval:.4f}", delta=badge, delta_color="off")

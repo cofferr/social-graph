@@ -292,6 +292,9 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
             "in_degree": node_metrics.get("in_degree", 0),
             "out_degree": node_metrics.get("out_degree", 0),
             "mutual_count": node_metrics.get("mutual_count", 0),
+            "betweenness": node_metrics.get("betweenness", 0),
+            "closeness": node_metrics.get("closeness", 0),
+            "clustering": node_metrics.get("clustering", 0),
         })
 
     sigma_edges = []

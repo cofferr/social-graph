@@ -10,16 +10,6 @@ import json
 def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     """
     Genera un componente HTML completo con Sigma.js v3 + Graphology.
-    Características:
-    - Renderizado WebGL
-    - Click en nodo → panel lateral con métricas
-    - Hover → highlight de conexiones directas
-    - Filtros por tipo de nodo (Todos / Solo curso / Mutuos)
-    - Filtros por comunidad (toggle por comunidad, apilables)
-    - Aislamiento de vecinos y de comunidad desde el panel
-    - Botón Reset para limpiar todos los filtros activos
-    - Búsqueda de nodo
-    - Zoom / pan nativos
     """
     graph_str = json.dumps(graph_json)
 
@@ -110,20 +100,14 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     color: #b8b0ff;
   }}
 
-  /* Community buttons: colored left border */
   .comm-btn {{
     border-left-width: 3px !important;
     border-left-style: solid !important;
     padding-left: 8px !important;
   }}
 
-  /* Reset button */
-  #reset-btn {{
-    opacity: 0.65;
-  }}
-  #reset-btn:hover {{
-    opacity: 1;
-  }}
+  #reset-btn {{ opacity: 0.65; }}
+  #reset-btn:hover {{ opacity: 1; }}
 
   /* ── Isolation banner ────────────────────────────────────────────────────── */
   #isolation-banner {{
@@ -143,9 +127,7 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     justify-content: space-between;
     gap: 12px;
   }}
-  #isolation-banner.visible {{
-    display: flex;
-  }}
+  #isolation-banner.visible {{ display: flex; }}
   #isolation-exit {{
     background: none;
     border: 1px solid rgba(124,111,255,0.4);
@@ -158,9 +140,7 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     white-space: nowrap;
     flex-shrink: 0;
   }}
-  #isolation-exit:hover {{
-    background: rgba(124,111,255,0.2);
-  }}
+  #isolation-exit:hover {{ background: rgba(124,111,255,0.2); }}
 
   /* ── Panel lateral ───────────────────────────────────────────────────────── */
   #panel {{
@@ -209,10 +189,7 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     margin-bottom: 4px;
     word-break: break-all;
   }}
-  .panel-username::before {{
-    content: '@';
-    color: #7c6fff;
-  }}
+  .panel-username::before {{ content: '@'; color: #7c6fff; }}
 
   .panel-badge {{
     display: inline-block;
@@ -257,7 +234,6 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
   }}
   .metric-value.small {{ font-size: 13px; }}
 
-  /* Panel action buttons */
   .panel-action-row {{
     display: flex;
     flex-direction: column;
@@ -277,15 +253,8 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     transition: all 0.15s;
     text-align: left;
   }}
-  .panel-action-btn:hover {{
-    border-color: rgba(255,255,255,0.35);
-    background: rgba(40,40,60,0.9);
-  }}
-  .panel-action-btn.active {{
-    border-color: #7c6fff;
-    background: rgba(124,111,255,0.2);
-    color: #b8b0ff;
-  }}
+  .panel-action-btn:hover {{ border-color: rgba(255,255,255,0.35); background: rgba(40,40,60,0.9); }}
+  .panel-action-btn.active {{ border-color: #7c6fff; background: rgba(124,111,255,0.2); color: #b8b0ff; }}
 
   .section-title {{
     font-size: 9px;
@@ -322,13 +291,8 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
   }}
   .node-chip:hover {{ background: rgba(124,111,255,0.15); color: #b8b0ff; }}
 
-  .divider {{
-    border: none;
-    border-top: 1px solid rgba(255,255,255,0.06);
-    margin: 14px 0;
-  }}
+  .divider {{ border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 14px 0; }}
 
-  /* ── Stats bar ───────────────────────────────────────────────────────────── */
   #stats-bar {{
     position: absolute;
     bottom: 12px;
@@ -348,7 +312,6 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
   }}
   #stats-bar span b {{ color: rgba(255,255,255,0.75); }}
 
-  /* ── Zoom controls ───────────────────────────────────────────────────────── */
   #zoom-controls {{
     position: absolute;
     bottom: 60px;
@@ -371,48 +334,34 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     justify-content: center;
     transition: all 0.15s;
   }}
-  .zoom-btn:hover {{
-    border-color: rgba(255,255,255,0.35);
-    background: rgba(40,40,60,0.9);
-  }}
+  .zoom-btn:hover {{ border-color: rgba(255,255,255,0.35); background: rgba(40,40,60,0.9); }}
 </style>
 </head>
 <body>
 <div id="container">
-
-  <!-- ── Graph area ──────────────────────────────────────────────────────── -->
   <div id="sigma-container">
-
-    <!-- Isolation banner (top of graph) -->
     <div id="isolation-banner">
       <span id="isolation-text">Modo aislamiento</span>
       <button id="isolation-exit">Salir ×</button>
     </div>
 
-    <!-- Toolbar -->
     <div id="toolbar">
       <input id="search-box" type="text" placeholder="🔍  Buscar usuario..."/>
-
-      <!-- Row 1: node-type filters + reset -->
       <div class="filter-row" id="type-filter-row">
         <button class="filter-btn active" data-filter="all">Todos</button>
         <button class="filter-btn" data-filter="course">Solo curso</button>
         <button class="filter-btn" data-filter="mutual">Mutuos</button>
         <button class="filter-btn" id="reset-btn">↺ Reset</button>
       </div>
-
-      <!-- Row 2: community filters (populated by JS) -->
       <div class="filter-row" id="community-filter-row"></div>
     </div>
 
-    <!-- Zoom controls -->
     <div id="zoom-controls">
       <button class="zoom-btn" id="zoom-in">+</button>
       <button class="zoom-btn" id="zoom-out">−</button>
       <button class="zoom-btn" id="zoom-fit" title="Ajustar">⊡</button>
     </div>
 
-    <!-- Stats bar -->
     <div id="stats-bar">
       <span><b id="stat-nodes">0</b> nodos</span>
       <span><b id="stat-edges">0</b> arcos</span>
@@ -421,7 +370,6 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
     </div>
   </div>
 
-  <!-- ── Side panel ──────────────────────────────────────────────────────── -->
   <div id="panel">
     <button id="panel-close">×</button>
     <div id="panel-inner">
@@ -429,56 +377,28 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
       <div id="p-badge" class="panel-badge badge-external">EXTERNO</div>
 
       <div class="metric-grid">
-        <div class="metric-card">
-          <div class="metric-label">Seguidores</div>
-          <div class="metric-value" id="p-indegree">0</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Siguiendo</div>
-          <div class="metric-value" id="p-outdegree">0</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Mutuos</div>
-          <div class="metric-value" id="p-mutual">0</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Comunidad</div>
-          <div class="metric-value" id="p-community">—</div>
-        </div>
+        <div class="metric-card"><div class="metric-label">Seguidores</div><div class="metric-value" id="p-indegree">0</div></div>
+        <div class="metric-card"><div class="metric-label">Siguiendo</div><div class="metric-value" id="p-outdegree">0</div></div>
+        <div class="metric-card"><div class="metric-label">Mutuos</div><div class="metric-value" id="p-mutual">0</div></div>
+        <div class="metric-card"><div class="metric-label">Comunidad</div><div class="metric-value" id="p-community">—</div></div>
       </div>
 
       <div class="metric-grid">
-        <div class="metric-card">
-          <div class="metric-label">Betweenness</div>
-          <div class="metric-value small" id="p-betweenness">0</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">PageRank</div>
-          <div class="metric-value small" id="p-pagerank">0</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Closeness</div>
-          <div class="metric-value small" id="p-closeness">0</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Clustering</div>
-          <div class="metric-value small" id="p-clustering">0</div>
-        </div>
+        <div class="metric-card"><div class="metric-label">Betweenness</div><div class="metric-value small" id="p-betweenness">0</div></div>
+        <div class="metric-card"><div class="metric-label">PageRank</div><div class="metric-value small" id="p-pagerank">0</div></div>
+        <div class="metric-card"><div class="metric-label">Closeness</div><div class="metric-value small" id="p-closeness">0</div></div>
+        <div class="metric-card"><div class="metric-label">Clustering</div><div class="metric-value small" id="p-clustering">0</div></div>
       </div>
 
-      <!-- Isolation action buttons -->
       <div class="panel-action-row">
         <button class="panel-action-btn" id="btn-isolate-neighbors">⬡ Aislar vecinos</button>
         <button class="panel-action-btn" id="btn-isolate-community">⬡ Ver comunidad</button>
       </div>
-
       <hr class="divider"/>
-
       <div id="follows-section">
         <div class="section-title">Sigue a (<span id="p-follows-count">0</span>)</div>
         <div class="node-list" id="p-follows"></div>
       </div>
-
       <div id="followed-section">
         <div class="section-title">Seguido por (<span id="p-followers-count">0</span>)</div>
         <div class="node-list" id="p-followers"></div>
@@ -491,316 +411,79 @@ def build_sigma_html(graph_json: dict, height: int = 700) -> str:
 <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
 <script>
 const GRAPH_DATA = {graph_str};
-
 const COMMUNITY_COLORS = [
   "#e63946","#457b9d","#2a9d8f","#e9c46a","#f4a261",
   "#a8dadc","#6a4c93","#1982c4","#8ac926","#ff595e",
   "#ffca3a","#6a994e","#bc4749","#0077b6","#7b2d8b"
 ];
 
-// ── Build graphology graph ─────────────────────────────────────────────────
-const graph = new graphology.Graph({{ type: 'directed', multi: false }});
+let hoveredNode = null;
+let selectedNode = null;
+let activeFilter = "all";
+let activeCommunities = new Set();
+let isolationMode = null;
+let isolatedNodes = new Set();
+let hiddenNodes = new Set();
 
+const graph = new graphology.Graph({{ type: 'directed', multi: false }});
 GRAPH_DATA.nodes.forEach(n => {{
   graph.addNode(n.id, {{
-    label: n.label,
-    x: n.x,
-    y: n.y,
-    size: n.size,
-    color: n.color,
-    has_file: n.has_file,
-    is_anonymous: n.is_anonymous || false,
-    in_degree: n.in_degree,
-    out_degree: n.out_degree,
-    betweenness: n.betweenness,
-    closeness: n.closeness,
-    clustering: n.clustering,
-    pagerank: n.pagerank,
-    mutual_count: n.mutual_count,
-    community: n.community,
+    ...n,
     originalColor: n.color,
     originalSize: n.size,
   }});
 }});
-
 GRAPH_DATA.edges.forEach(e => {{
-  try {{
-    graph.addEdge(e.source, e.target, {{
-      id: e.id,
-      size: 1,
-      color: "rgba(255,255,255,0.06)",
-      originalColor: "rgba(255,255,255,0.06)",
-      timestamp: e.timestamp,
-    }});
-  }} catch(err) {{}}
+  try {{ graph.addEdge(e.source, e.target, {{ ...e, size: 1, color: "rgba(255,255,255,0.06)", originalColor: "rgba(255,255,255,0.06)" }}); }} catch(err) {{}}
 }});
 
-// ── Sigma renderer ─────────────────────────────────────────────────────────
 const renderer = new Sigma(graph, document.getElementById("sigma-container"), {{
   renderEdgeLabels: false,
   defaultEdgeColor: "rgba(255,255,255,0.03)",
-  defaultNodeColor: "#7c6fff",
   labelFont: "Space Mono, monospace",
   labelSize: 11,
   labelColor: {{ color: "rgba(255,255,255,0.8)" }},
-  edgeReducer: (edge, data) => ({{ 
-    ...data, 
-    size: 0.5,
-    color: data.hidden ? "transparent" : (data.color || "rgba(255,255,255,0.03)")
-  }}),
+  edgeReducer: (edge, data) => {{
+    const res = {{ ...data, size: 0.5 }};
+    if (hiddenNodes.has(graph.source(edge)) || hiddenNodes.has(graph.target(edge))) {{
+      res.hidden = true;
+      res.color = "transparent";
+    }} else {{
+      res.hidden = false;
+      res.color = data.color || "rgba(255,255,255,0.03)";
+    }}
+    return res;
+  }},
   nodeReducer: (node, data) => {{
     const res = {{ ...data }};
-    if (res.hidden) return {{ ...res, label: "" }};
-
-    // Solo mostrar label si es owner, tiene PageRank alto, o está seleccionado/hover
-    const isImportant = data.has_file || data.pagerank > 0.01;
-    const isHovered = node === hoveredNode;
-    const isSelected = node === selectedNode;
-
-    if (!isImportant && !isHovered && !isSelected) {{
+    if (hiddenNodes.has(node)) {{
+      res.hidden = true;
       res.label = "";
+      return res;
     }}
+    res.hidden = false;
+    const isImportant = data.has_file || data.pagerank > 0.01;
+    if (!isImportant && node !== hoveredNode && node !== selectedNode) res.label = "";
     return res;
   }},
 }});
 
-let hoveredNode = null;
-renderer.on("enterNode", ({{ node }}) => {{
-  hoveredNode = node;
-  if (!selectedNode) highlightNode(node);
-}});
-renderer.on("leaveNode", () => {{
-  hoveredNode = null;
-  if (!selectedNode) resetHighlight();
-}});
-
-// Zoom inicial más alejado
-renderer.getCamera().setState({{ ratio: 1.2 }});
-const allCommunities = new Set(GRAPH_DATA.nodes.map(n => n.community));
-const density = GRAPH_DATA.nodes.length > 1
-  ? (GRAPH_DATA.edges.length / (GRAPH_DATA.nodes.length * (GRAPH_DATA.nodes.length - 1))).toFixed(4)
-  : 0;
-
-document.getElementById("stat-nodes").textContent = GRAPH_DATA.nodes.length;
-document.getElementById("stat-edges").textContent = GRAPH_DATA.edges.length;
-document.getElementById("stat-communities").textContent = allCommunities.size;
-document.getElementById("stat-density").textContent = density;
-
-// ── State ──────────────────────────────────────────────────────────────────
-let selectedNode = null;
-let activeFilter = "all";       // "all" | "course" | "mutual"
-let activeCommunities = new Set();  // Set of community IDs to show
-let isolationMode = null;       // null | "neighbors" | "community"
-let isolatedNodes = new Set();  // nodes visible in isolation
-let hiddenNodes = new Set();
-
-// ── Community filter buttons (dynamic) ────────────────────────────────────
-const communityIds = [...allCommunities].sort((a, b) => a - b);
-const commRow = document.getElementById("community-filter-row");
-
-communityIds.forEach(cid => {{
-  const color = COMMUNITY_COLORS[cid % COMMUNITY_COLORS.length];
-  const btn = document.createElement("button");
-  btn.className = "filter-btn comm-btn";
-  btn.textContent = "C" + cid;
-  btn.dataset.community = String(cid);
-  btn.style.borderLeftColor = color;
-
-  btn.addEventListener("click", () => {{
-    if (activeCommunities.has(cid)) {{
-      activeCommunities.delete(cid);
-      btn.classList.remove("active");
-      btn.style.background = "";
-      btn.style.color = "";
-    }} else {{
-      activeCommunities.add(cid);
-      btn.classList.add("active");
-      btn.style.background = color + "33";
-      btn.style.color = color;
-    }}
-    exitIsolation(false);
-    applyFilter();
-  }});
-
-  commRow.appendChild(btn);
-}});
-
-// ── Reset button ───────────────────────────────────────────────────────────
-document.getElementById("reset-btn").addEventListener("click", () => {{
-  activeFilter = "all";
-  activeCommunities.clear();
-
-  document.querySelectorAll(".filter-btn[data-filter]").forEach(b => {{
-    b.classList.toggle("active", b.dataset.filter === "all");
-  }});
-  document.querySelectorAll(".comm-btn").forEach(b => {{
-    b.classList.remove("active");
-    b.style.background = "";
-    b.style.color = "";
-  }});
-
-  exitIsolation(true);
-}});
-
-// ── Isolation banner ───────────────────────────────────────────────────────
-const isolationBanner = document.getElementById("isolation-banner");
-
-document.getElementById("isolation-exit").onclick = () => {{
-  exitIsolation(true);
-}};
-
-function exitIsolation(andApplyFilter) {{
-  isolationMode = null;
-  isolatedNodes.clear();
-  isolationBanner.classList.remove("visible");
-  document.getElementById("btn-isolate-neighbors").classList.remove("active");
-  document.getElementById("btn-isolate-community").classList.remove("active");
-  if (andApplyFilter) applyFilter();
-}}
-
-// ── Panel ──────────────────────────────────────────────────────────────────
-const panel = document.getElementById("panel");
-
-function openPanel(nodeId) {{
-  const attrs = graph.getNodeAttributes(nodeId);
-  selectedNode = nodeId;
-
-  document.getElementById("p-username").textContent = nodeId;
-
-  const badge = document.getElementById("p-badge");
-  if (attrs.is_anonymous) {{
-    badge.textContent = "ANON";
-    badge.className = "panel-badge badge-anon";
-  }} else if (attrs.has_file) {{
-    badge.textContent = "CURSO";
-    badge.className = "panel-badge badge-course";
-  }} else {{
-    badge.textContent = "EXTERNO";
-    badge.className = "panel-badge badge-external";
-  }}
-
-  document.getElementById("p-indegree").textContent = attrs.in_degree;
-  document.getElementById("p-outdegree").textContent = attrs.out_degree;
-  document.getElementById("p-mutual").textContent = attrs.mutual_count;
-  document.getElementById("p-community").textContent = attrs.community;
-  document.getElementById("p-betweenness").textContent = attrs.betweenness?.toFixed(4) ?? "—";
-  document.getElementById("p-pagerank").textContent = attrs.pagerank?.toFixed(6) ?? "—";
-  document.getElementById("p-closeness").textContent = attrs.closeness?.toFixed(4) ?? "—";
-  document.getElementById("p-clustering").textContent = attrs.clustering?.toFixed(4) ?? "—";
-
-  const followsOut = graph.outNeighbors(nodeId);
-  document.getElementById("p-follows-count").textContent = followsOut.length;
-  const followsEl = document.getElementById("p-follows");
-  followsEl.innerHTML = "";
-  followsOut.slice(0, 50).forEach(u => {{
-    const chip = document.createElement("div");
-    chip.className = "node-chip";
-    chip.textContent = "@" + u;
-    chip.onclick = () => focusNode(u);
-    followsEl.appendChild(chip);
-  }});
-
-  const followsIn = graph.inNeighbors(nodeId);
-  document.getElementById("p-followers-count").textContent = followsIn.length;
-  const followersEl = document.getElementById("p-followers");
-  followersEl.innerHTML = "";
-  followsIn.slice(0, 50).forEach(u => {{
-    const chip = document.createElement("div");
-    chip.className = "node-chip";
-    chip.textContent = "@" + u;
-    chip.onclick = () => focusNode(u);
-    followersEl.appendChild(chip);
-  }});
-
-  panel.classList.add("open");
-  highlightNode(nodeId);
-}}
-
-function closePanel() {{
-  panel.classList.remove("open");
-  selectedNode = null;
-  exitIsolation(true);
-  resetHighlight();
-}}
-
-document.getElementById("panel-close").onclick = closePanel;
-
-// ── Isolation buttons (inside panel) ──────────────────────────────────────
-document.getElementById("btn-isolate-neighbors").onclick = () => {{
-  if (!selectedNode) return;
-  if (isolationMode === "neighbors") {{
-    exitIsolation(true);
-    return;
-  }}
-  isolationMode = "neighbors";
-  isolatedNodes = new Set([
-    selectedNode,
-    ...graph.outNeighbors(selectedNode),
-    ...graph.inNeighbors(selectedNode),
-  ]);
-  document.getElementById("isolation-text").textContent =
-    "Vecinos de @" + selectedNode + " — " + (isolatedNodes.size - 1) + " conexiones";
-  isolationBanner.classList.add("visible");
-  document.getElementById("btn-isolate-neighbors").classList.add("active");
-  document.getElementById("btn-isolate-community").classList.remove("active");
-  applyFilter();
-}};
-
-document.getElementById("btn-isolate-community").onclick = () => {{
-  if (!selectedNode) return;
-  if (isolationMode === "community") {{
-    exitIsolation(true);
-    return;
-  }}
-  const comm = graph.getNodeAttribute(selectedNode, "community");
-  isolationMode = "community";
-  isolatedNodes = new Set(
-    graph.nodes().filter(n => graph.getNodeAttribute(n, "community") === comm)
-  );
-  document.getElementById("isolation-text").textContent =
-    "Comunidad " + comm + " — " + isolatedNodes.size + " nodos";
-  isolationBanner.classList.add("visible");
-  document.getElementById("btn-isolate-community").classList.add("active");
-  document.getElementById("btn-isolate-neighbors").classList.remove("active");
-  applyFilter();
-}};
-
-// ── Apply filter ───────────────────────────────────────────────────────────
 function applyFilter() {{
   hiddenNodes.clear();
-
   graph.forEachNode((n, attrs) => {{
     let hidden = false;
-
-    // Node-type filter
     if (activeFilter === "course" && !attrs.has_file) hidden = true;
     if (activeFilter === "mutual" && attrs.mutual_count === 0) hidden = true;
-
-    // Community filter (stacks on top)
     if (activeCommunities.size > 0 && !activeCommunities.has(attrs.community)) hidden = true;
-
-    // Isolation mode (overrides all — only show isolated nodes)
     if (isolationMode && !isolatedNodes.has(n)) hidden = true;
-
-    graph.setNodeAttribute(n, "hidden", hidden);
     if (hidden) hiddenNodes.add(n);
   }});
-
-  graph.forEachEdge((edge, attrs, source, target) => {{
-    graph.setEdgeAttribute(edge, "hidden",
-      hiddenNodes.has(source) || hiddenNodes.has(target));
-  }});
-
   if (selectedNode && hiddenNodes.has(selectedNode)) closePanel();
+  renderer.refresh();
 }}
 
-// ── Highlight ──────────────────────────────────────────────────────────────
 function highlightNode(nodeId) {{
-  const neighbors = new Set([
-    ...graph.outNeighbors(nodeId),
-    ...graph.inNeighbors(nodeId),
-  ]);
-
+  const neighbors = new Set([...graph.outNeighbors(nodeId), ...graph.inNeighbors(nodeId)]);
   graph.forEachNode((n, attrs) => {{
     if (hiddenNodes.has(n)) return;
     if (n === nodeId) {{
@@ -814,7 +497,6 @@ function highlightNode(nodeId) {{
       graph.setNodeAttribute(n, "size", attrs.originalSize * 0.6);
     }}
   }});
-
   graph.forEachEdge((edge, attrs, source, target) => {{
     if (hiddenNodes.has(source) || hiddenNodes.has(target)) return;
     if (source === nodeId || target === nodeId) {{
@@ -842,58 +524,139 @@ function resetHighlight() {{
   }});
 }}
 
-// ── Sigma events ───────────────────────────────────────────────────────────
-renderer.on("clickNode", ({{ node }}) => {{
-  if (selectedNode === node) closePanel();
-  else openPanel(node);
-}});
+const panel = document.getElementById("panel");
+function openPanel(nodeId) {{
+  const attrs = graph.getNodeAttributes(nodeId);
+  selectedNode = nodeId;
+  document.getElementById("p-username").textContent = nodeId;
+  const badge = document.getElementById("p-badge");
+  badge.textContent = attrs.is_anonymous ? "ANON" : (attrs.has_file ? "CURSO" : "EXTERNO");
+  badge.className = "panel-badge " + (attrs.is_anonymous ? "badge-anon" : (attrs.has_file ? "badge-course" : "badge-external"));
+  
+  const mapping = {{
+    indegree: "in_degree",
+    outdegree: "out_degree",
+    mutual: "mutual_count",
+    community: "community",
+    betweenness: "betweenness",
+    pagerank: "pagerank",
+    closeness: "closeness",
+    clustering: "clustering"
+  }};
 
-renderer.on("clickStage", () => {{
-  if (selectedNode) closePanel();
-}});
+  Object.entries(mapping).forEach(([m, attr]) => {{
+    const val = attrs[attr];
+    const el = document.getElementById("p-" + m);
+    if (el) el.textContent = (typeof val === 'number' && val < 1) ? val.toFixed(4) : (val ?? "—");
+  }});
 
-renderer.on("enterNode", ({{ node }}) => {{
-  if (!selectedNode) highlightNode(node);
-}});
+  const updateList = (id, neighbors) => {{
+    const el = document.getElementById(id); el.innerHTML = "";
+    neighbors.slice(0, 50).forEach(u => {{
+      const chip = document.createElement("div"); chip.className = "node-chip"; chip.textContent = "@" + u;
+      chip.onclick = () => focusNode(u); el.appendChild(chip);
+    }});
+  }};
+  updateList("p-follows", graph.outNeighbors(nodeId));
+  updateList("p-followers", graph.inNeighbors(nodeId));
+  document.getElementById("p-follows-count").textContent = graph.outNeighbors(nodeId).length;
+  document.getElementById("p-followers-count").textContent = graph.inNeighbors(nodeId).length;
 
-renderer.on("leaveNode", () => {{
-  if (!selectedNode) resetHighlight();
-}});
+  panel.classList.add("open");
+  highlightNode(nodeId);
+}}
 
-// ── Focus node ─────────────────────────────────────────────────────────────
+function closePanel() {{ panel.classList.remove("open"); selectedNode = null; exitIsolation(true); resetHighlight(); }}
+document.getElementById("panel-close").onclick = closePanel;
+
 function focusNode(nodeId) {{
   if (!graph.hasNode(nodeId)) return;
   const attrs = graph.getNodeAttributes(nodeId);
-  renderer.getCamera().animate(
-    {{ x: attrs.x, y: attrs.y, ratio: 0.5 }},
-    {{ duration: 500 }}
-  );
+  renderer.getCamera().animate({{ x: attrs.x, y: attrs.y, ratio: 0.5 }}, {{ duration: 500 }});
   openPanel(nodeId);
 }}
 
-// ── Search ─────────────────────────────────────────────────────────────────
+function exitIsolation(andApplyFilter) {{
+  isolationMode = null; isolatedNodes.clear();
+  document.getElementById("isolation-banner").classList.remove("visible");
+  document.getElementById("btn-isolate-neighbors").classList.remove("active");
+  document.getElementById("btn-isolate-community").classList.remove("active");
+  if (andApplyFilter) applyFilter();
+}}
+
+document.getElementById("isolation-exit").onclick = () => exitIsolation(true);
+
+document.getElementById("btn-isolate-neighbors").onclick = () => {{
+  if (!selectedNode) return;
+  if (isolationMode === "neighbors") return exitIsolation(true);
+  isolationMode = "neighbors";
+  isolatedNodes = new Set([selectedNode, ...graph.outNeighbors(selectedNode), ...graph.inNeighbors(selectedNode)]);
+  document.getElementById("isolation-text").textContent = "Vecinos de @" + selectedNode;
+  document.getElementById("isolation-banner").classList.add("visible");
+  document.getElementById("btn-isolate-neighbors").classList.add("active");
+  applyFilter();
+}};
+
+document.getElementById("btn-isolate-community").onclick = () => {{
+  if (!selectedNode) return;
+  if (isolationMode === "community") return exitIsolation(true);
+  const comm = graph.getNodeAttribute(selectedNode, "community");
+  isolationMode = "community";
+  isolatedNodes = new Set(graph.nodes().filter(n => graph.getNodeAttribute(n, "community") === comm));
+  document.getElementById("isolation-text").textContent = "Comunidad " + comm;
+  document.getElementById("isolation-banner").classList.add("visible");
+  document.getElementById("btn-isolate-community").classList.add("active");
+  applyFilter();
+}};
+
+renderer.on("enterNode", ({{ node }}) => {{ hoveredNode = node; if (!selectedNode) highlightNode(node); }});
+renderer.on("leaveNode", () => {{ hoveredNode = null; if (!selectedNode) resetHighlight(); }});
+renderer.on("clickNode", ({{ node }}) => {{ if (selectedNode === node) closePanel(); else openPanel(node); }});
+renderer.on("clickStage", () => {{ if (selectedNode) closePanel(); }});
+
 document.getElementById("search-box").addEventListener("input", e => {{
   const query = e.target.value.toLowerCase().trim();
-  if (!query) {{ resetHighlight(); return; }}
   const match = graph.nodes().find(n => n.toLowerCase().includes(query));
   if (match) focusNode(match);
 }});
 
-// ── Node-type filter buttons ───────────────────────────────────────────────
 document.querySelectorAll(".filter-btn[data-filter]").forEach(btn => {{
-  btn.addEventListener("click", () => {{
+  btn.onclick = () => {{
     document.querySelectorAll(".filter-btn[data-filter]").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    activeFilter = btn.dataset.filter;
-    exitIsolation(false);
-    applyFilter();
-  }});
+    btn.classList.add("active"); activeFilter = btn.dataset.filter; exitIsolation(false); applyFilter();
+  }};
 }});
 
-// ── Zoom controls ──────────────────────────────────────────────────────────
-document.getElementById("zoom-in").onclick  = () => renderer.getCamera().animatedZoom({{ duration: 300 }});
-document.getElementById("zoom-out").onclick = () => renderer.getCamera().animatedUnzoom({{ duration: 300 }});
-document.getElementById("zoom-fit").onclick = () => renderer.getCamera().animatedReset({{ duration: 300 }});
+const commRow = document.getElementById("community-filter-row");
+[...new Set(GRAPH_DATA.nodes.map(n => n.community))].sort((a,b)=>a-b).forEach(cid => {{
+  const color = COMMUNITY_COLORS[cid % COMMUNITY_COLORS.length];
+  const btn = document.createElement("button"); btn.className = "filter-btn comm-btn"; btn.textContent = "C" + cid;
+  btn.style.borderLeftColor = color;
+  btn.onclick = () => {{
+    if (activeCommunities.has(cid)) {{ activeCommunities.delete(cid); btn.classList.remove("active"); btn.style.background = ""; }}
+    else {{ activeCommunities.add(cid); btn.classList.add("active"); btn.style.background = color + "33"; }}
+    exitIsolation(false); applyFilter();
+  }};
+  commRow.appendChild(btn);
+}});
+
+document.getElementById("reset-btn").onclick = () => {{
+  activeFilter = "all"; activeCommunities.clear();
+  document.querySelectorAll(".filter-btn[data-filter]").forEach(b => b.classList.toggle("active", b.dataset.filter === "all"));
+  document.querySelectorAll(".comm-btn").forEach(b => {{ b.classList.remove("active"); b.style.background = ""; }});
+  exitIsolation(true);
+}};
+
+const density = GRAPH_DATA.nodes.length > 1 ? (GRAPH_DATA.edges.length / (GRAPH_DATA.nodes.length * (GRAPH_DATA.nodes.length - 1))).toFixed(4) : 0;
+document.getElementById("stat-nodes").textContent = GRAPH_DATA.nodes.length;
+document.getElementById("stat-edges").textContent = GRAPH_DATA.edges.length;
+document.getElementById("stat-communities").textContent = new Set(GRAPH_DATA.nodes.map(n => n.community)).size;
+document.getElementById("stat-density").textContent = density;
+
+document.getElementById("zoom-in").onclick = () => renderer.getCamera().animatedZoom();
+document.getElementById("zoom-out").onclick = () => renderer.getCamera().animatedUnzoom();
+document.getElementById("zoom-fit").onclick = () => renderer.getCamera().animatedReset();
+renderer.getCamera().setState({{ ratio: 1.2 }});
 </script>
 </body>
 </html>"""
