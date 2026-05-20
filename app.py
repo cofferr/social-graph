@@ -32,6 +32,11 @@ from pipeline.analysis import (
     get_components_info,
     compute_global_metrics,
 )
+from pipeline.updater import (
+    list_course_users,
+    preview_rename,
+    rename_user,
+)
 from viz.renderer import build_sigma_html
 
 # ── Migración de versión (una sola vez por arranque) ─────────────────────────
@@ -145,22 +150,26 @@ hr { border-color: rgba(255,255,255,0.07) !important; }
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=5)
+@st.cache_data
 def get_graph_metrics(only_course: bool):
+    """Cacheado sin TTL: solo se invalida con .clear() explícito."""
     G = build_graph(only_course_nodes=only_course)
     metrics = compute_metrics(G)
     sigma_data = graph_to_sigma_format(G, metrics)
     return G, metrics, sigma_data
 
 
-@st.cache_data(ttl=5)
+@st.cache_data
 def get_analysis_data():
+    """Reutiliza betweenness de compute_metrics para no calcularlo dos veces."""
     G = build_graph(only_course_nodes=False)
+    metrics = compute_metrics(G)
+    precomputed_bw = metrics.get("betweenness", None)
     course_nodes = {n for n, d in G.nodes(data=True) if d.get("has_file")}
-    df = build_analysis_dataframe(G, course_nodes)
+    df = build_analysis_dataframe(G, course_nodes, precomputed_betweenness=precomputed_bw)
     global_m = compute_global_metrics(G)
     components = get_components_info(G, course_nodes)
-    return G, df, global_m, components, course_nodes
+    return G, df, global_m, components, course_nodes, precomputed_bw
 
 
 def status_icon(status: str) -> str:
@@ -241,6 +250,7 @@ with st.sidebar:
                 )
 
             get_graph_metrics.clear()
+            get_analysis_data.clear()
 
     st.divider()
 
@@ -264,6 +274,7 @@ with st.sidebar:
                     icon = status_icon(r["status"])
                     st.markdown(f"`{icon}` **{r.get('source_name','')}** — {r['message']}")
             get_graph_metrics.clear()
+            get_analysis_data.clear()
 
     st.divider()
 
@@ -310,7 +321,24 @@ with st.sidebar:
 
     st.divider()
 
-    # ── 5. Zona peligrosa ─────────────────────────────────────────────────────
+    # ── 5. Grafo ──────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-label'>Grafo</div>", unsafe_allow_html=True)
+
+    col_ref, col_clr = st.columns(2)
+    with col_ref:
+        if st.button("↺ Actualizar", width="stretch", help="Recarga el grafo y las métricas desde los datos en disco."):
+            get_graph_metrics.clear()
+            get_analysis_data.clear()
+            st.rerun()
+    with col_clr:
+        if st.button("✕ Limpiar caché", width="stretch", help="Fuerza que el próximo acceso recalcule todo desde cero."):
+            get_graph_metrics.clear()
+            get_analysis_data.clear()
+            st.toast("Caché eliminado. El grafo se recalculará al cargar la pestaña.", icon="✓")
+
+    st.divider()
+
+    # ── 6. Zona peligrosa ─────────────────────────────────────────────────────
     with st.expander("⚠️ Zona peligrosa", expanded=False):
         st.caption(
             "Esto borra **todos** los datos: registry, grafo, y archivos en raw/ e incompleto/. "
@@ -323,6 +351,7 @@ with st.sidebar:
             VERSION_PATH.write_text(DATA_VERSION)
             st.session_state.clear()
             get_graph_metrics.clear()
+            get_analysis_data.clear()
             st.rerun()
 
 
@@ -354,7 +383,7 @@ if anon_files:
     )
 
 # ── Pestañas principales ──────────────────────────────────────────────────────
-tab_grafo, tab_analisis = st.tabs(["Grafo", "Análisis"])
+tab_grafo, tab_analisis, tab_gestion = st.tabs(["Grafo", "Análisis", "Gestión"])
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -422,7 +451,7 @@ with tab_grafo:
 # PESTAÑA 2 — ANÁLISIS
 # ════════════════════════════════════════════════════════════════════════════
 with tab_analisis:
-    G_a, df_a, global_m, components, course_nodes = get_analysis_data()
+    G_a, df_a, global_m, components, course_nodes, precomputed_bw = get_analysis_data()
 
     st.markdown("## Análisis estructural")
     st.markdown(
@@ -578,7 +607,7 @@ with tab_analisis:
     )
 
     if selected_user:
-        profile = get_node_profile(G_a, selected_user, df_a)
+        profile = get_node_profile(G_a, selected_user, df_a, precomputed_betweenness=precomputed_bw)
         m = profile.get("metrics", {})
 
         st.markdown(f"#### @{selected_user}")
@@ -658,3 +687,143 @@ with tab_analisis:
                 with bcols[i]:
                     badge = "Curso" if bnode in course_nodes else "Externo"
                     st.metric(f"@{bnode}", f"{bval:.4f}", delta=badge, delta_color="off")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# PESTAÑA 3 — GESTIÓN
+# ════════════════════════════════════════════════════════════════════════════
+with tab_gestion:
+    st.markdown("## Gestión de usuarios")
+    st.markdown(
+        "<div class='section-label'>Actualiza nombres de usuario · los cambios se propagan a registry, grafo y archivos en disco</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Estado actual del registro ────────────────────────────────────────────
+    st.markdown("### Usuarios del curso registrados")
+
+    course_users = list_course_users()
+    reg = load_registry()
+
+    rows_reg = []
+    for u in course_users:
+        # Buscar entradas del registro para este usuario
+        entries = [m for fid, m in reg.items() if not fid.startswith("_") and m.get("owner") == u]
+        has_following = any(e["file_type"] == "following" for e in entries)
+        has_followers = any(e["file_type"] == "followers" for e in entries)
+        complete = has_following and has_followers
+        rows_reg.append({
+            "Usuario": f"@{u}",
+            "Following": "✓" if has_following else "—",
+            "Followers": "✓" if has_followers else "—",
+            "Completo": "✅" if complete else "🔵",
+            "Archivos": len(entries),
+        })
+
+    st.dataframe(
+        pd.DataFrame(rows_reg),
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.divider()
+
+    # ── Renombrar usuario ─────────────────────────────────────────────────────
+    st.markdown("### Renombrar usuario")
+    st.caption(
+        "Actualiza el username en el grafo, el registro y los archivos en disco. "
+        "Útil si alguien cambió su usuario de Instagram o si se ingresó con un typo."
+    )
+
+    col_old, col_new = st.columns(2)
+    with col_old:
+        old_user = st.selectbox(
+            "Usuario actual",
+            options=[""] + course_users,
+            format_func=lambda x: f"@{x}" if x else "— Selecciona —",
+            key="rename_old",
+        )
+    with col_new:
+        new_user = st.text_input(
+            "Nuevo username",
+            placeholder="ej: nuevo_usuario",
+            key="rename_new",
+        ).strip().lower()
+
+    # Previsualización en tiempo real
+    if old_user and new_user:
+        preview = preview_rename(old_user, new_user)
+        if not preview["valid"]:
+            st.error(f"⚠️ {preview['error']}")
+        else:
+            st.markdown("**Impacto del cambio:**")
+            pc1, pc2, pc3 = st.columns(3)
+            pc1.metric("Arcos afectados", preview["edges_affected"])
+            pc2.metric("Nodos con referencias", preview["nodes_affected"])
+            pc3.metric("Archivos en disco", preview["files_affected"])
+    elif old_user and not new_user:
+        st.info("Escribe el nuevo username para previsualizar el impacto.")
+
+    st.markdown("")  # spacing
+
+    confirm_rename = st.checkbox(
+        "Confirmo que quiero renombrar este usuario — esta operación no se puede deshacer fácilmente.",
+        key="confirm_rename",
+        value=False,
+    )
+
+    rename_btn = st.button(
+        "Aplicar renombrado",
+        disabled=not (old_user and new_user and confirm_rename),
+        type="primary",
+    )
+
+    if rename_btn:
+        if not old_user or not new_user:
+            st.error("Selecciona el usuario actual y escribe el nuevo username.")
+        elif not confirm_rename:
+            st.warning("Activa la casilla de confirmación para continuar.")
+        else:
+            with st.spinner(f"Renombrando @{old_user} → @{new_user}…"):
+                result = rename_user(old_user, new_user)
+
+            if result["success"]:
+                st.success(f"✅ {result['summary']}")
+                for w in result.get("warnings", []):
+                    st.warning(f"⚠️ {w}")
+                # Invalidar todas las cachés para que el grafo se recargue
+                get_graph_metrics.clear()
+                get_analysis_data.clear()
+                st.rerun()
+            else:
+                st.error(f"❌ {result['error']}")
+
+    st.divider()
+
+    # ── Historial del registro ────────────────────────────────────────────────
+    st.markdown("### Historial del registro")
+    st.caption("Todos los archivos procesados y su estado actual.")
+
+    real_entries = {k: v for k, v in reg.items() if not k.startswith("_")}
+    if real_entries:
+        hist_rows = []
+        for fid, meta in real_entries.items():
+            hist_rows.append({
+                "ID":        fid,
+                "Owner":     f"@{meta.get('owner', '—')}",
+                "Tipo":      meta.get("file_type", "—"),
+                "Completo":  "✅" if meta.get("is_complete") else "🔵",
+                "Relaciones": meta.get("relation_count", 0),
+                "Inferido":  "Sí" if meta.get("inferred_owner") else "No",
+                "Confianza": f"{meta.get('inference_confidence', 1.0):.0%}",
+                "Fecha":     meta.get("ingested_at", "—")[:10],
+                "Archivo":   meta.get("source_name", "—"),
+            })
+        st.dataframe(
+            pd.DataFrame(hist_rows),
+            hide_index=True,
+            width="stretch",
+            height=350,
+        )
+    else:
+        st.info("No hay entradas en el registro aún.")

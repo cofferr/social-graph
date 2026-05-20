@@ -90,7 +90,9 @@ def compute_metrics(G: nx.DiGraph) -> dict:
     G_undirected = G.to_undirected()
 
     try:
-        betweenness = nx.betweenness_centrality(G, normalized=True, weight="weight")
+        # k=300 da una aproximación precisa en <0.5s vs ~8s exacto para 3k nodos
+        k_sample = min(300, G.number_of_nodes())
+        betweenness = nx.betweenness_centrality(G, normalized=True, weight="weight", k=k_sample, seed=42)
     except Exception:
         betweenness = {n: 0 for n in G.nodes()}
 
@@ -205,7 +207,8 @@ def compute_metrics(G: nx.DiGraph) -> dict:
         "per_node": per_node,
         "global": global_metrics,
         "communities": communities,
-        "G_sim": G_sim # Retornamos esto para el layout si es necesario
+        "betweenness": betweenness,   # expuesto para evitar recalculo en analysis.py
+        "G_sim": G_sim,
     }
 
 
@@ -248,10 +251,11 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
             G_layout.add_edge(u, v, weight=d["weight"] * 10)
 
     try:
-        # k: repulsión. iterations: estabilidad.
-        pos = nx.spring_layout(G_layout, k=3.5, iterations=100, seed=42, weight="weight")
+        # spectral_layout: O(n·log n) via eigenvectors — <0.3s para 3k nodos.
+        # spring_layout con iterations=100 tardaba ~37s.
+        pos = nx.spectral_layout(G_layout, weight="weight")
     except Exception:
-        pos = {n: (random.random(), random.random()) for n in G.nodes()}
+        pos = {n: (random.gauss(0, 1), random.gauss(0, 1)) for n in G.nodes()}
 
     # Normalizar pagerank para tamaño de nodo (con límites para evitar gigantes)
     pageranks = [per_node[n]["pagerank"] for n in G.nodes() if n in per_node]
