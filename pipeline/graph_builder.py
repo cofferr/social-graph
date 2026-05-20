@@ -9,13 +9,21 @@ import networkx as nx
 import community as community_louvain
 from pipeline.ingestion import load_graph_data
 
+SIMILARITY_THRESHOLD = 0.08
+
+def calculate_jaccard(set1: set, set2: set) -> float:
+    """Calcula la similitud de Jaccard entre dos conjuntos."""
+    if not set1 or not set2:
+        return 0.0
+    intersection = len(set1 & set2)
+    union = len(set1 | set2)
+    return intersection / union if union > 0 else 0.0
 
 def build_graph(only_course_nodes: bool = False) -> nx.DiGraph:
     """
     Construye grafo dirigido desde los datos acumulados.
-
-    only_course_nodes: si True, filtra nodos que no tienen archivo propio
-    (es decir, solo muestra personas del curso que subieron su archivo).
+    
+    Incluye lógica de pesos y arcos de similitud entre owners.
     """
     graph_data = load_graph_data()
     G = nx.DiGraph()
@@ -25,6 +33,7 @@ def build_graph(only_course_nodes: bool = False) -> nx.DiGraph:
 
     course_nodes = {u for u, d in nodes.items() if d.get("has_file")}
 
+    # 1. Agregar nodos
     for username, data in nodes.items():
         if only_course_nodes and username not in course_nodes:
             continue
@@ -34,16 +43,32 @@ def build_graph(only_course_nodes: bool = False) -> nx.DiGraph:
             is_anonymous=data.get("is_anonymous", False),
             following_count=len(data.get("following", [])),
             followers_count=len(data.get("followers", [])),
+            following_set=set(data.get("following", [])),
+            followers_set=set(data.get("followers", []))
         )
 
+    # 2. Agregar arcos de follow con pesos
+    # Bonus de mutualidad y timestamps
     for edge in edges:
         src, tgt = edge["source"], edge["target"]
         if only_course_nodes:
             if src not in course_nodes or tgt not in course_nodes:
                 continue
         if G.has_node(src) and G.has_node(tgt):
-            G.add_edge(src, tgt, timestamp=edge.get("timestamp", 0))
+            weight = 1.0
+            ts = edge.get("timestamp", 0)
+            
+            # Si ya existe el arco inverso (mutual), subimos peso
+            if G.has_edge(tgt, src):
+                G[tgt][src]["weight"] += 0.5
+                weight += 0.5
+            
+            G.add_edge(src, tgt, weight=weight, timestamp=ts, type="follow")
 
+    # 3. Agregar arcos de similitud entre owners (solo para layout/comunidades interno)
+    # Nota: No los agregamos a G directamente para no ensuciar los arcos dirigidos de follow,
+    # pero los usaremos en compute_metrics para el grafo de Louvain.
+    
     return G
 
 
@@ -62,13 +87,17 @@ def compute_metrics(G: nx.DiGraph) -> dict:
     in_deg = dict(G.in_degree())
     out_deg = dict(G.out_degree())
 
-    # Centralidades (sobre grafo no dirigido para algunas)
     G_undirected = G.to_undirected()
 
     try:
-        betweenness = nx.betweenness_centrality(G, normalized=True)
+        betweenness = nx.betweenness_centrality(G, normalized=True, weight="weight")
     except Exception:
         betweenness = {n: 0 for n in G.nodes()}
+
+    try:
+        pagerank = nx.pagerank(G, alpha=0.85, weight="weight")
+    except Exception:
+        pagerank = {n: 0 for n in G.nodes()}
 
     try:
         closeness = nx.closeness_centrality(G)
@@ -80,28 +109,77 @@ def compute_metrics(G: nx.DiGraph) -> dict:
     except Exception:
         clustering = {n: 0 for n in G.nodes()}
 
-    try:
-        pagerank = nx.pagerank(G, alpha=0.85)
-    except Exception:
-        pagerank = {n: 0 for n in G.nodes()}
+    # --- COMUNIDADES POR SIMILITUD ---
+    # Creamos un grafo de similitud solo para Louvain
+    G_sim = nx.Graph()
+    owners = [n for n, d in G.nodes(data=True) if d.get("has_file")]
+    
+    # Agregar nodos owners a G_sim
+    for o in owners:
+        G_sim.add_node(o)
 
-    # Comunidades (Louvain, sobre grafo no dirigido)
+    # Calcular similitudes entre todos los pares de owners
+    for i in range(len(owners)):
+        for j in range(i + 1, len(owners)):
+            u1, u2 = owners[i], owners[j]
+            # Combinamos following y followers para una firma social completa
+            set1 = G.nodes[u1]["following_set"] | G.nodes[u1]["followers_set"]
+            set2 = G.nodes[u2]["following_set"] | G.nodes[u2]["followers_set"]
+            
+            sim = calculate_jaccard(set1, set2)
+            
+            if sim >= SIMILARITY_THRESHOLD:
+                # Bonus por proximidad temporal en follows compartidos
+                # Si ambos siguieron a las mismas personas en fechas cercanas
+                common = set1 & set2
+                ts_bonus = 0.0
+                for c_node in common:
+                    # Buscamos timestamps en G
+                    # A -> x
+                    ts1 = 0
+                    if G.has_edge(u1, c_node): ts1 = G[u1][c_node].get("timestamp", 0)
+                    elif G.has_edge(c_node, u1): ts1 = G[c_node][u1].get("timestamp", 0)
+                    
+                    ts2 = 0
+                    if G.has_edge(u2, c_node): ts2 = G[u2][c_node].get("timestamp", 0)
+                    elif G.has_edge(c_node, u2): ts2 = G[c_node][u2].get("timestamp", 0)
+                    
+                    if ts1 > 0 and ts2 > 0:
+                        diff_days = abs(ts1 - ts2) / 86400
+                        if diff_days < 7: # Bonus si siguieron en la misma semana
+                            ts_bonus += 0.05
+                
+                G_sim.add_edge(u1, u2, weight=sim + min(ts_bonus, 0.5))
+
+    # Louvain sobre owners
     communities = {}
     try:
-        partition = community_louvain.best_partition(G_undirected)
-        communities = partition
+        if G_sim.number_of_edges() > 0:
+            partition = community_louvain.best_partition(G_sim, weight="weight")
+            communities = partition
+        else:
+            communities = {n: 0 for n in owners}
     except Exception:
-        communities = {n: 0 for n in G.nodes()}
+        communities = {n: 0 for n in owners}
+
+    # Propagar comunidades a nodos externos
+    # Un nodo externo toma la comunidad más frecuente entre los owners con los que conecta
+    for node in G.nodes():
+        if node in communities:
+            continue
+            
+        # Vecinos que son owners
+        neighbors = set(G.successors(node)) | set(G.predecessors(node))
+        owner_neighbors = [n for n in neighbors if n in communities]
+        
+        if owner_neighbors:
+            neighbor_communities = [communities[n] for n in owner_neighbors]
+            communities[node] = max(set(neighbor_communities), key=neighbor_communities.count)
+        else:
+            communities[node] = 0 # Comunidad default
 
     per_node = {}
     for node in G.nodes():
-        # Vecinos directos
-        successors = list(G.successors(node))    # a quienes sigue
-        predecessors = list(G.predecessors(node)) # quienes lo siguen
-
-        # Mutualidad: siguen en ambas direcciones
-        mutual = [u for u in successors if u in predecessors]
-
         per_node[node] = {
             "in_degree": in_deg.get(node, 0),
             "out_degree": out_deg.get(node, 0),
@@ -109,33 +187,25 @@ def compute_metrics(G: nx.DiGraph) -> dict:
             "closeness": round(closeness.get(node, 0), 4),
             "clustering": round(clustering.get(node, 0), 4),
             "pagerank": round(pagerank.get(node, 0), 6),
-            "mutual_count": len(mutual),
-            "mutual_with": mutual,
-            "follows": successors,
-            "followed_by": predecessors,
             "community": communities.get(node, 0),
             "has_file": G.nodes[node].get("has_file", False),
             "is_anonymous": G.nodes[node].get("is_anonymous", False),
+            "mutual_count": len([u for u in G.successors(node) if u in G.predecessors(node)]),
         }
 
-    # Métricas globales
     global_metrics = {
         "node_count": G.number_of_nodes(),
         "edge_count": G.number_of_edges(),
         "density": round(nx.density(G), 4),
         "community_count": len(set(communities.values())),
-        "course_node_count": sum(1 for n in G.nodes() if G.nodes[n].get("has_file")),
+        "course_node_count": len(owners),
     }
-
-    try:
-        global_metrics["avg_clustering"] = round(nx.average_clustering(G_undirected), 4)
-    except Exception:
-        global_metrics["avg_clustering"] = 0
 
     return {
         "per_node": per_node,
         "global": global_metrics,
         "communities": communities,
+        "G_sim": G_sim # Retornamos esto para el layout si es necesario
     }
 
 
@@ -152,12 +222,9 @@ def _desaturate(hex_color: str, factor: float = 0.35) -> str:
 
 def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
     """
-    Serializa el grafo al formato que necesita sigma.js:
-    { nodes: [{id, label, x, y, size, color, ...attrs}], edges: [{id, source, target}] }
-
-    Usa spring layout para posiciones iniciales.
+    Serializa el grafo al formato que necesita sigma.js.
+    Mejora la dispersión del layout.
     """
-    import math
     import random
 
     community_colors = [
@@ -168,14 +235,25 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
 
     per_node = metrics.get("per_node", {})
     communities = metrics.get("communities", {})
+    G_sim = metrics.get("G_sim", nx.Graph())
 
-    # Layout con spring para posiciones legibles
+    # --- LAYOUT HÍBRIDO ---
+    # Para el layout, creamos un grafo que combine follows (pesados) y similitud (muy pesados)
+    # Esto forzará a que los clusters de similitud se agrupen fuertemente.
+    G_layout = G.to_undirected()
+    for u, v, d in G_sim.edges(data=True):
+        if G_layout.has_edge(u, v):
+            G_layout[u][v]["weight"] = G_layout[u][v].get("weight", 1.0) + d["weight"] * 10
+        else:
+            G_layout.add_edge(u, v, weight=d["weight"] * 10)
+
     try:
-        pos = nx.spring_layout(G, k=2.5, iterations=80, seed=42)
+        # k: repulsión. iterations: estabilidad.
+        pos = nx.spring_layout(G_layout, k=3.5, iterations=100, seed=42, weight="weight")
     except Exception:
         pos = {n: (random.random(), random.random()) for n in G.nodes()}
 
-    # Normalizar pagerank para tamaño de nodo
+    # Normalizar pagerank para tamaño de nodo (con límites para evitar gigantes)
     pageranks = [per_node[n]["pagerank"] for n in G.nodes() if n in per_node]
     max_pr = max(pageranks) if pageranks else 1
     min_pr = min(pageranks) if pageranks else 0
@@ -186,13 +264,15 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
         x, y = pos.get(node, (0, 0))
         node_metrics = per_node.get(node, {})
         pr = node_metrics.get("pagerank", 0)
-        size = 6 + 20 * (pr - min_pr) / pr_range
+        
+        # Tamaño más consistente: entre 4 y 18
+        size = 4 + 14 * (pr - min_pr) / pr_range
+        
         community_id = communities.get(node, 0)
         color = community_colors[community_id % len(community_colors)]
         has_file = G.nodes[node].get("has_file", False)
         is_anonymous = G.nodes[node].get("is_anonymous", False)
 
-        # Desaturate color for anonymous nodes
         if is_anonymous:
             node_color = _desaturate(color)
         else:
@@ -201,20 +281,17 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
         sigma_nodes.append({
             "id": node,
             "label": node,
-            "x": float(x) * 1000,
-            "y": float(y) * 1000,
+            "x": float(x) * 1500, # Escala aumentada para dispersión
+            "y": float(y) * 1500,
             "size": round(size, 2),
             "color": node_color,
             "has_file": has_file,
             "is_anonymous": is_anonymous,
+            "pagerank": node_metrics.get("pagerank", 0),
+            "community": community_id,
             "in_degree": node_metrics.get("in_degree", 0),
             "out_degree": node_metrics.get("out_degree", 0),
-            "betweenness": node_metrics.get("betweenness", 0),
-            "closeness": node_metrics.get("closeness", 0),
-            "clustering": node_metrics.get("clustering", 0),
-            "pagerank": node_metrics.get("pagerank", 0),
             "mutual_count": node_metrics.get("mutual_count", 0),
-            "community": community_id,
         })
 
     sigma_edges = []
@@ -224,6 +301,7 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
             "source": src,
             "target": tgt,
             "timestamp": data.get("timestamp", 0),
+            "color": "rgba(255,255,255,0.05)" # Mucho más transparente
         })
 
     return {"nodes": sigma_nodes, "edges": sigma_edges}

@@ -538,16 +538,44 @@ GRAPH_DATA.edges.forEach(e => {{
 // ── Sigma renderer ─────────────────────────────────────────────────────────
 const renderer = new Sigma(graph, document.getElementById("sigma-container"), {{
   renderEdgeLabels: false,
-  defaultEdgeColor: "rgba(255,255,255,0.06)",
+  defaultEdgeColor: "rgba(255,255,255,0.03)",
   defaultNodeColor: "#7c6fff",
   labelFont: "Space Mono, monospace",
-  labelSize: 10,
-  labelColor: {{ color: "rgba(255,255,255,0.7)" }},
-  edgeReducer: (edge, data) => ({{ ...data, size: 1 }}),
-  nodeReducer: (node, data) => ({{ ...data }}),
+  labelSize: 11,
+  labelColor: {{ color: "rgba(255,255,255,0.8)" }},
+  edgeReducer: (edge, data) => ({{ 
+    ...data, 
+    size: 0.5,
+    color: data.hidden ? "transparent" : (data.color || "rgba(255,255,255,0.03)")
+  }}),
+  nodeReducer: (node, data) => {{
+    const res = {{ ...data }};
+    if (res.hidden) return {{ ...res, label: "" }};
+
+    // Solo mostrar label si es owner, tiene PageRank alto, o está seleccionado/hover
+    const isImportant = data.has_file || data.pagerank > 0.01;
+    const isHovered = node === hoveredNode;
+    const isSelected = node === selectedNode;
+
+    if (!isImportant && !isHovered && !isSelected) {{
+      res.label = "";
+    }}
+    return res;
+  }},
 }});
 
-// ── Stats bar ──────────────────────────────────────────────────────────────
+let hoveredNode = null;
+renderer.on("enterNode", ({{ node }}) => {{
+  hoveredNode = node;
+  if (!selectedNode) highlightNode(node);
+}});
+renderer.on("leaveNode", () => {{
+  hoveredNode = null;
+  if (!selectedNode) resetHighlight();
+}});
+
+// Zoom inicial más alejado
+renderer.getCamera().setState({{ ratio: 1.2 }});
 const allCommunities = new Set(GRAPH_DATA.nodes.map(n => n.community));
 const density = GRAPH_DATA.nodes.length > 1
   ? (GRAPH_DATA.edges.length / (GRAPH_DATA.nodes.length * (GRAPH_DATA.nodes.length - 1))).toFixed(4)

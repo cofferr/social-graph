@@ -9,9 +9,26 @@ import json
 import pandas as pd
 from pathlib import Path
 
-from pipeline.ingestion import scan_local_folder, process_file, load_registry, load_graph_data
+from pipeline.ingestion import (
+    scan_local_folder,
+    process_paired_upload,
+    load_registry,
+    load_graph_data,
+    reset_all_data,
+    get_completeness,
+    check_and_migrate_version,
+    VERSION_PATH,
+    DATA_VERSION,
+    RAW_FOLLOWING_PATH,
+    RAW_FOLLOWERS_PATH,
+    INC_FOLLOWING_PATH,
+    INC_FOLLOWERS_PATH,
+)
 from pipeline.graph_builder import build_graph, compute_metrics, graph_to_sigma_format
 from viz.renderer import build_sigma_html
+
+# ── Migración de versión (una sola vez por arranque) ─────────────────────────
+check_and_migrate_version()
 
 # ── Config ───────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -34,19 +51,16 @@ html, body, [class*="css"] {
     color: #e8e8f0;
 }
 
-/* Sidebar */
 [data-testid="stSidebar"] {
     background: #0e0e1a !important;
     border-right: 1px solid rgba(255,255,255,0.06) !important;
 }
 
-/* Títulos */
 h1, h2, h3 {
     font-family: 'Space Mono', monospace !important;
     color: #e8e8f0 !important;
 }
 
-/* Métricas */
 [data-testid="stMetric"] {
     background: rgba(255,255,255,0.03);
     border: 1px solid rgba(255,255,255,0.07);
@@ -65,7 +79,6 @@ h1, h2, h3 {
     color: #e8e8f0 !important;
 }
 
-/* Botones */
 .stButton > button {
     background: rgba(124,111,255,0.15) !important;
     border: 1px solid rgba(124,111,255,0.4) !important;
@@ -80,36 +93,30 @@ h1, h2, h3 {
     border-color: rgba(124,111,255,0.7) !important;
 }
 
-/* File uploader */
 [data-testid="stFileUploader"] {
     background: rgba(255,255,255,0.02) !important;
     border: 1px dashed rgba(255,255,255,0.12) !important;
     border-radius: 10px !important;
 }
 
-/* Expander */
 [data-testid="stExpander"] {
     background: rgba(255,255,255,0.02) !important;
     border: 1px solid rgba(255,255,255,0.07) !important;
     border-radius: 8px !important;
 }
 
-/* Dataframe */
 [data-testid="stDataFrame"] {
     background: rgba(255,255,255,0.02) !important;
 }
 
-/* Info / success / error boxes */
 .stAlert {
     border-radius: 8px !important;
     font-family: 'Space Mono', monospace !important;
     font-size: 11px !important;
 }
 
-/* Divider */
 hr { border-color: rgba(255,255,255,0.07) !important; }
 
-/* Section label */
 .section-label {
     font-family: 'Space Mono', monospace;
     font-size: 9px;
@@ -118,6 +125,12 @@ hr { border-color: rgba(255,255,255,0.07) !important; }
     letter-spacing: 0.12em;
     margin-bottom: 12px;
     margin-top: 20px;
+}
+
+/* Danger zone expander: red tint */
+.danger-expander [data-testid="stExpander"] {
+    border-color: rgba(230,57,70,0.3) !important;
+    background: rgba(230,57,70,0.04) !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -141,94 +154,170 @@ def status_icon(status: str) -> str:
 
 with st.sidebar:
     st.markdown("# 🕸️ Social Graph")
-    st.markdown("<div class='section-label'>Pipeline · Ingesta</div>", unsafe_allow_html=True)
 
-    # ── Scan carpeta local
-    with st.expander("📁 Carpetas locales", expanded=False):
+    # ── 1. Upload emparejado ─────────────────────────────────────────────────
+    st.markdown("<div class='section-label'>Subir archivos</div>", unsafe_allow_html=True)
+
+    with st.form("upload_form", clear_on_submit=True):
+        username_input = st.text_input(
+            "👤 Username de Instagram",
+            placeholder="ej: jorge_mercado12a",
+            help="Requerido. Debe coincidir con tu usuario real de Instagram.",
+        )
+
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            following_file = st.file_uploader(
+                "📤 following.json",
+                type=["json"],
+                key="following_upload",
+                help="Exportado desde Instagram → Configuración → Tu actividad → Descargar tu información",
+            )
+        with col_f2:
+            followers_file = st.file_uploader(
+                "📤 followers*.json",
+                type=["json"],
+                key="followers_upload",
+                help="Puede llamarse followers_1.json u otro nombre que comience con 'followers'",
+            )
+
+        submitted = st.form_submit_button("⬆️ Subir", use_container_width=True)
+
+    if submitted:
+        username_clean = username_input.strip().lower() if username_input else ""
+        has_following = following_file is not None
+        has_followers = followers_file is not None
+
+        if not username_clean:
+            st.sidebar.error("⚠️ Debes ingresar tu username de Instagram.")
+        elif not has_following and not has_followers:
+            st.sidebar.error("⚠️ Sube al menos un archivo (following.json o followers.json).")
+        else:
+            following_bytes = following_file.read() if has_following else None
+            followers_bytes = followers_file.read() if has_followers else None
+
+            with st.sidebar:
+                with st.spinner("Procesando..."):
+                    outcome = process_paired_upload(
+                        username=username_clean,
+                        following_content=following_bytes,
+                        following_name=following_file.name if has_following else "",
+                        followers_content=followers_bytes,
+                        followers_name=followers_file.name if has_followers else "",
+                    )
+
+            for r in outcome["results"]:
+                icon = status_icon(r["status"])
+                fn = r.get("source_name", "archivo")
+                if r["status"] == "error":
+                    st.sidebar.error(f"{icon} **{fn}**: {r['message']}")
+                elif r["status"] == "duplicate":
+                    st.sidebar.warning(f"{icon} **{fn}**: {r['message']}")
+                else:
+                    st.sidebar.success(f"{icon} **{fn}**: {r['message']}")
+
+            if outcome["is_complete"]:
+                st.sidebar.success(f"✅ **@{outcome['owner']}** — perfil completo (following + followers).")
+            else:
+                st.sidebar.info(
+                    f"🔵 **@{outcome['owner']}** — perfil incompleto. "
+                    "Sube el archivo que falta para completarlo."
+                )
+
+            get_graph_metrics.clear()
+
+    st.divider()
+
+    # ── 2. Scan carpeta local ────────────────────────────────────────────────
+    st.markdown("<div class='section-label'>Carpetas locales</div>", unsafe_allow_html=True)
+
+    with st.expander("📁 Escanear carpetas", expanded=False):
         st.caption(
-            "`data/raw/following/` — coloca aquí los following.json\n\n"
-            "`data/raw/followers/` — coloca aquí los followers.json\n\n"
-            "Nombra como `following_username.json` o `followers_username.json` para auto-detectar el owner."
+            "`data/raw/following/` — following.json\n\n"
+            "`data/raw/followers/` — followers.json\n\n"
+            "`data/incompleto/following/` y `data/incompleto/followers/` — archivos incompletos\n\n"
+            "Nombra como `following_username.json` para auto-detectar el owner."
         )
         if st.button("🔄 Escanear carpetas", use_container_width=True):
             with st.spinner("Escaneando..."):
                 results = scan_local_folder()
             if not results:
-                st.info("No se encontraron archivos JSON en data/raw/following/ ni data/raw/followers/")
+                st.info("No se encontraron archivos JSON en las carpetas.")
             else:
                 for r in results:
                     icon = status_icon(r["status"])
                     st.markdown(f"`{icon}` **{r.get('source_name','')}** — {r['message']}")
             get_graph_metrics.clear()
 
-    # ── Upload manual
-    st.markdown("<div class='section-label'>Subir archivos</div>", unsafe_allow_html=True)
+    st.divider()
 
-    uploaded = st.file_uploader(
-        "following.json / followers.json",
-        type=["json"],
-        accept_multiple_files=True,
-        help="Puedes subir múltiples archivos a la vez",
-    )
+    # ── 3. Estado de completitud ─────────────────────────────────────────────
+    st.markdown("<div class='section-label'>Completitud</div>", unsafe_allow_html=True)
 
-    if uploaded:
-        owner_input = st.text_input(
-            "Tu username de Instagram (opcional)",
-            placeholder="ej: jorge_mercado12a",
-            help="Si subes varios archivos del mismo usuario, escribe el username una sola vez. Puedes dejarlo vacío.",
-        )
-        owner = owner_input.strip().lower() if owner_input.strip() else None
+    registry = load_registry()
+    completeness = get_completeness(registry)
+    n_complete = len(completeness["complete"])
+    n_incomplete = len(completeness["incomplete"])
 
-        if st.button("⬆️ Procesar archivos subidos", use_container_width=True):
-            for uf in uploaded:
-                content = uf.read()
-                result = process_file(content, source_name=uf.name, declared_owner=owner)
-                icon = status_icon(result["status"])
-                if result["status"] == "error":
-                    st.error(f"{icon} **{uf.name}**: {result['message']}")
-                elif result["status"] == "duplicate":
-                    st.warning(f"{icon} **{uf.name}**: {result['message']}")
-                elif result["status"] == "anonymous":
-                    st.info(f"{icon} **{uf.name}**: {result['message']}")
-                else:
-                    st.success(f"{icon} **{uf.name}**: {result['message']}")
-            get_graph_metrics.clear()
+    c1, c2 = st.columns(2)
+    c1.metric("Completos ✅", n_complete)
+    c2.metric("Incompletos 🔵", n_incomplete)
+
+    if n_incomplete:
+        with st.expander(f"Ver {n_incomplete} usuario(s) incompletos", expanded=False):
+            for owner, info in completeness["incomplete"].items():
+                missing_label = "followers" if info["missing"] == "followers" else "following"
+                st.markdown(f"- **@{owner}** — tiene `{info['has']}`, falta `{missing_label}`")
 
     st.divider()
 
-    # ── Registro
+    # ── 4. Registro ──────────────────────────────────────────────────────────
     st.markdown("<div class='section-label'>Registro</div>", unsafe_allow_html=True)
-    registry = load_registry()
-    st.metric("Archivos procesados", len(registry))
 
-    if registry:
+    # Count only real file entries (skip meta keys like _anon_counter)
+    real_entries = {k: v for k, v in registry.items() if not k.startswith("_")}
+    st.metric("Archivos procesados", len(real_entries))
+
+    if real_entries:
         with st.expander("Ver registro", expanded=False):
             rows = []
-            for fid, meta in registry.items():
+            for fid, meta in real_entries.items():
                 rows.append({
                     "Owner": meta.get("owner") or "—",
                     "Tipo": meta.get("file_type", "—"),
+                    "Completo": "✅" if meta.get("is_complete") else "🔵",
                     "Relaciones": meta.get("relation_count", 0),
                     "Fecha": meta.get("ingested_at", "—")[:10],
                     "Inferido": "Sí" if meta.get("inferred_owner") else "No",
                 })
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-        if st.button("🗑️ Limpiar todo el registro", use_container_width=True):
-            Path("data/registry/registry.json").unlink(missing_ok=True)
-            Path("data/graph_data.json").unlink(missing_ok=True)
-            get_graph_metrics.clear()
-            st.rerun()
-
     st.divider()
 
-    # ── Opciones de grafo
+    # ── 5. Opciones del grafo ─────────────────────────────────────────────────
     st.markdown("<div class='section-label'>Opciones del grafo</div>", unsafe_allow_html=True)
     only_course = st.toggle(
         "Solo nodos del curso",
         value=False,
         help="Filtra para mostrar únicamente personas que subieron su archivo",
     )
+
+    st.divider()
+
+    # ── 6. Zona peligrosa ─────────────────────────────────────────────────────
+    with st.expander("⚠️ Zona peligrosa", expanded=False):
+        st.caption(
+            "Esto borra **todos** los datos: registry, grafo, y archivos en raw/ e incompleto/. "
+            "No se puede deshacer."
+        )
+        if st.button("🗑️ Reset completo", use_container_width=True, type="primary"):
+            reset_all_data()
+            # Write version file so we don't auto-reset on next load
+            VERSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+            VERSION_PATH.write_text(DATA_VERSION)
+            st.session_state.clear()
+            get_graph_metrics.clear()
+            st.rerun()
 
 
 # ── Main area ────────────────────────────────────────────────────────────────
@@ -240,19 +329,22 @@ anon_files = graph_data_raw.get("anonymous_files", [])
 if node_count == 0:
     st.markdown("## Sin datos aún")
     st.markdown("""
-    Para comenzar:
-    1. Coloca archivos `following.json` en `data/raw/following/` y `followers.json` en `data/raw/followers/`, luego presiona **Escanear carpetas**, o
-    2. Sube archivos directamente usando el uploader en la barra lateral.
+    Para comenzar sube tus archivos de Instagram en la barra lateral:
 
-    Los archivos los exporta Instagram desde: **Configuración → Tu actividad → Descargar tu información**.
+    1. Escribe tu **username de Instagram**
+    2. Sube tu `following.json` y/o `followers*.json`
+    3. Presiona **Subir**
+
+    Los archivos los exporta Instagram desde:
+    **Configuración → Tu actividad → Descargar tu información → Conexiones**
     """)
     st.stop()
 
 if anon_files:
     st.warning(
         f"⚠️ **{len(anon_files)} archivo(s) sin owner identificado** — "
-        "se muestran sus nodos pero sin arcos de origen. "
-        "Se resolverán automáticamente al procesar más archivos, o puedes volver a subirlos declarando el username."
+        "sus nodos aparecen en el grafo como `uniN`. "
+        "Se resolverán automáticamente al procesar más archivos, o súbelos de nuevo declarando el username."
     )
 
 # Cargar grafo y métricas
@@ -260,7 +352,7 @@ G, metrics, sigma_data = get_graph_metrics(only_course)
 gm = metrics["global"]
 per_node = metrics["per_node"]
 
-# ── Métricas globales
+# ── Métricas globales ─────────────────────────────────────────────────────────
 st.markdown("## Grafo del curso")
 
 col1, col2, col3, col4, col5 = st.columns(5)
@@ -272,15 +364,18 @@ col5.metric("Densidad", gm.get("density", 0))
 
 st.divider()
 
-# ── Grafo Sigma
-st.markdown("<div class='section-label'>Visualización interactiva · Haz clic en un nodo para ver sus métricas</div>", unsafe_allow_html=True)
+# ── Grafo Sigma ───────────────────────────────────────────────────────────────
+st.markdown(
+    "<div class='section-label'>Visualización interactiva · Haz clic en un nodo para ver sus métricas</div>",
+    unsafe_allow_html=True,
+)
 
 sigma_html = build_sigma_html(sigma_data, height=680)
 st.components.v1.html(sigma_html, height=680, scrolling=False)
 
 st.divider()
 
-# ── Tabla de métricas por nodo
+# ── Tabla de métricas por nodo ────────────────────────────────────────────────
 st.markdown("### Ranking de nodos")
 
 tab1, tab2 = st.tabs(["📊 Métricas completas", "🏆 Rankings"])
@@ -291,6 +386,7 @@ with tab1:
         rows.append({
             "Usuario": username,
             "Curso": "✓" if m["has_file"] else "",
+            "Anon": "uni" if m.get("is_anonymous") else "",
             "Seguidores (in)": m["in_degree"],
             "Siguiendo (out)": m["out_degree"],
             "Mutuos": m["mutual_count"],
@@ -328,9 +424,13 @@ with tab2:
             badge = "🎓" if m["has_file"] else "·"
             st.markdown(f"`{i:02d}` {badge} **@{u}** — {m['mutual_count']}")
 
-# ── Archivos anónimos pendientes
+# ── Archivos anónimos pendientes ──────────────────────────────────────────────
 if anon_files:
     st.divider()
     with st.expander(f"Ver {len(anon_files)} archivo(s) anónimos pendientes"):
         for af in anon_files:
-            st.markdown(f"- `{af['file_type']}` · {len(af['relations'])} relaciones · fuente: `{af['source_name']}`")
+            label = af.get("assigned_owner", "—")
+            st.markdown(
+                f"- `{af['file_type']}` · {len(af['relations'])} relaciones · "
+                f"asignado como `@{label}` · fuente: `{af['source_name']}`"
+            )

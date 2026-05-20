@@ -20,15 +20,52 @@ Formatos soportados:
 import json
 import re
 import hashlib
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-REGISTRY_PATH = Path("data/registry/registry.json")
-GRAPH_DATA_PATH = Path("data/graph_data.json")
+REGISTRY_PATH    = Path("data/registry/registry.json")
+GRAPH_DATA_PATH  = Path("data/graph_data.json")
+VERSION_PATH     = Path("data/.version")
+DATA_VERSION     = "2"
 
-RAW_FOLLOWING_PATH = Path("data/raw/following")
-RAW_FOLLOWERS_PATH = Path("data/raw/followers")
+RAW_FOLLOWING_PATH  = Path("data/raw/following")
+RAW_FOLLOWERS_PATH  = Path("data/raw/followers")
+INC_FOLLOWING_PATH  = Path("data/incompleto/following")
+INC_FOLLOWERS_PATH  = Path("data/incompleto/followers")
+
+
+# ─── Reset / versioning ───────────────────────────────────────────────────────
+
+def reset_all_data():
+    """Borra todos los datos generados: registry, graph, archivos raw e incompleto."""
+    REGISTRY_PATH.unlink(missing_ok=True)
+    GRAPH_DATA_PATH.unlink(missing_ok=True)
+
+    for folder in (RAW_FOLLOWING_PATH, RAW_FOLLOWERS_PATH,
+                   INC_FOLLOWING_PATH, INC_FOLLOWERS_PATH):
+        if folder.exists():
+            for f in folder.glob("*.json"):
+                f.unlink(missing_ok=True)
+
+    # Re-create the folder structure
+    for folder in (RAW_FOLLOWING_PATH, RAW_FOLLOWERS_PATH,
+                   INC_FOLLOWING_PATH, INC_FOLLOWERS_PATH,
+                   REGISTRY_PATH.parent):
+        folder.mkdir(parents=True, exist_ok=True)
+
+
+def check_and_migrate_version():
+    """
+    Si data/.version no existe o contiene una versión < DATA_VERSION,
+    fuerza un reset_all_data() y escribe la versión actual.
+    """
+    current = VERSION_PATH.read_text().strip() if VERSION_PATH.exists() else "0"
+    if current < DATA_VERSION:
+        reset_all_data()
+        VERSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        VERSION_PATH.write_text(DATA_VERSION)
 
 
 # ─── Utilidades ──────────────────────────────────────────────────────────────
@@ -44,8 +81,7 @@ def _load_json(content: bytes) -> tuple[Optional[dict | list], Optional[str]]:
 def _stable_id(data: dict | list) -> str:
     """
     Hash determinista basado en los pares (username, timestamp) del archivo.
-    Funciona para following y followers. Misma persona subiendo dos veces
-    produce el mismo hash → duplicado detectado.
+    Misma persona subiendo dos veces produce el mismo hash → duplicado detectado.
     """
     pairs = []
     if isinstance(data, list):
@@ -96,7 +132,6 @@ def _extract_relations(data: dict | list, file_type: str) -> list[dict]:
     for entry in entries:
         sld = entry.get("string_list_data", [{}])
         item = sld[0] if sld else {}
-        # Format B stores username in "value"; Format A stores it in entry["title"]
         username = (item.get("value") or entry.get("title", "")).strip().lower()
         ts = item.get("timestamp", 0)
         if username:
@@ -109,10 +144,7 @@ def _extract_owner_from_stem(stem: str) -> Optional[str]:
     Extracts owner username from a filename stem, stripping Instagram's
     default naming patterns and numeric-only suffixes.
 
-    Rules:
-    - Strip known base names: 'following', 'followers_1', 'followers'
-    - Strip numeric-only suffixes: trailing digits, spaces, underscores, parens
-    - Only treat the remainder as an owner if it contains at least one letter
+    Only returns an owner if the remaining suffix contains at least one letter.
 
     Examples:
       following          → None
@@ -129,28 +161,21 @@ def _extract_owner_from_stem(stem: str) -> Optional[str]:
     """
     s = stem.lower()
 
-    # Strip known base prefixes (order matters: longest first)
+    # Strip known base prefixes (longest first)
     for base in ["followers_1", "followers", "following"]:
         if s.startswith(base):
             s = s[len(base):]
             break
 
-    # Strip leading separators
     s = re.sub(r'^[\s_]+', '', s)
-
-    # Strip trailing/remaining numeric junk:
-    # patterns like "(2)", "__3_", " 2", "1", etc.
-    # Remove all segments that are purely numeric (with surrounding punctuation)
-    s = re.sub(r'[\s_]*\(\d+\)[\s_]*', '', s)   # (2), ( 3 )
+    s = re.sub(r'[\s_]*\(\d+\)[\s_]*', '', s)   # (2)
     s = re.sub(r'[\s_]*__\d+__[\s_]*', '', s)    # __3__
     s = re.sub(r'[\s_]*__\d+_[\s_]*', '', s)     # __3_
     s = re.sub(r'[\s_]*_\d+__[\s_]*', '', s)     # _3__
     s = re.sub(r'[\s_]+\d+[\s_]*$', '', s)       # trailing " 2", "_2"
     s = re.sub(r'^\d+$', '', s)                   # purely numeric remainder
-
     s = s.strip('_ \t')
 
-    # Only return if at least one letter remains
     if s and re.search(r'[a-z]', s):
         return s
     return None
@@ -186,6 +211,116 @@ def save_graph_data(graph_data: dict):
         json.dump(graph_data, f, indent=2, ensure_ascii=False)
 
 
+# ─── Completitud ─────────────────────────────────────────────────────────────
+
+def get_completeness(registry: Optional[dict] = None) -> dict:
+    """
+    Returns a dict with owner completeness information.
+
+    Returns:
+      {
+        "complete": ["alice", "bob"],           # have both file types
+        "incomplete": {
+          "jorge": {"has": "following", "missing": "followers"},
+          "maria": {"has": "followers", "missing": "following"},
+        }
+      }
+    """
+    if registry is None:
+        registry = load_registry()
+
+    owner_types: dict[str, set] = {}
+    for fid, meta in registry.items():
+        if fid.startswith("_"):
+            continue
+        owner = meta.get("owner")
+        ft = meta.get("file_type")
+        if not owner or not ft:
+            continue
+        owner_types.setdefault(owner, set()).add(ft)
+
+    complete = []
+    incomplete = {}
+    for owner, types in owner_types.items():
+        if "following" in types and "followers" in types:
+            complete.append(owner)
+        elif "following" in types:
+            incomplete[owner] = {"has": "following", "missing": "followers"}
+        else:
+            incomplete[owner] = {"has": "followers", "missing": "following"}
+
+    return {"complete": complete, "incomplete": incomplete}
+
+
+def move_to_incompleto(owner: str, file_type: str, registry: dict):
+    """
+    Moves raw file for owner+file_type to the incompleto subfolder.
+    Updates registry source_path to reflect the new location.
+    """
+    src_folder = RAW_FOLLOWING_PATH if file_type == "following" else RAW_FOLLOWERS_PATH
+    dst_folder = INC_FOLLOWING_PATH if file_type == "following" else INC_FOLLOWERS_PATH
+    dst_folder.mkdir(parents=True, exist_ok=True)
+
+    for fid, meta in registry.items():
+        if fid.startswith("_"):
+            continue
+        if meta.get("owner") == owner and meta.get("file_type") == file_type:
+            src_name = meta.get("source_name", "")
+            src_path = src_folder / src_name
+            if src_path.exists():
+                dst_path = dst_folder / src_name
+                shutil.move(str(src_path), str(dst_path))
+                meta["incompleto"] = True
+
+
+def move_from_incompleto(owner: str, registry: dict):
+    """
+    Moves all incompleto files for an owner back to the main raw folders.
+    Clears the incompleto flag in registry.
+    """
+    for fid, meta in registry.items():
+        if fid.startswith("_"):
+            continue
+        if meta.get("owner") == owner and meta.get("incompleto"):
+            file_type = meta.get("file_type")
+            src_folder = INC_FOLLOWING_PATH if file_type == "following" else INC_FOLLOWERS_PATH
+            dst_folder = RAW_FOLLOWING_PATH if file_type == "following" else RAW_FOLLOWERS_PATH
+            dst_folder.mkdir(parents=True, exist_ok=True)
+            src_name = meta.get("source_name", "")
+            src_path = src_folder / src_name
+            if src_path.exists():
+                shutil.move(str(src_path), str(dst_folder / src_name))
+            meta.pop("incompleto", None)
+
+
+def update_completeness_after_ingestion(owner: str, registry: dict):
+    """
+    After processing a file for `owner`, check if they are now complete or still
+    incomplete, and move files accordingly. Saves registry.
+    """
+    completeness = get_completeness(registry)
+
+    if owner in completeness["complete"]:
+        # Ensure any previously-incompleto files are back in raw
+        move_from_incompleto(owner, registry)
+        # Mark all of owner's registry entries as complete
+        for fid, meta in registry.items():
+            if fid.startswith("_"):
+                continue
+            if meta.get("owner") == owner:
+                meta["is_complete"] = True
+    elif owner in completeness["incomplete"]:
+        info = completeness["incomplete"][owner]
+        # Move the existing file to incompleto
+        move_to_incompleto(owner, info["has"], registry)
+        # Mark as incomplete
+        for fid, meta in registry.items():
+            if fid.startswith("_"):
+                continue
+            if meta.get("owner") == owner:
+                meta["is_complete"] = False
+
+
 # ─── Inferencia de identidad ─────────────────────────────────────────────────
 
 def _try_infer_owner(
@@ -194,14 +329,12 @@ def _try_infer_owner(
     graph_data: dict,
 ) -> tuple[Optional[str], float]:
     """
-    Intenta inferir el dueño de un archivo anónimo cruzando con archivos ya procesados.
-
     Returns (owner, confidence) where confidence is in [0, 1].
 
     Rules:
-    - Threshold lowered to 60% overlap, but requires at least 5 matching relations.
-    - For followers files: boost to 0.90 confidence if 3+ course nodes appear in
-      the file (they are known-identity nodes, making the overlap highly diagnostic).
+    - Threshold: 60% overlap AND at least 5 matching relations.
+    - Followers boost: if 3+ course nodes appear in the followers file,
+      confidence is set to 0.90 (highly diagnostic).
     """
     usernames_in_file = {r["username"] for r in relations}
     known_nodes = graph_data.get("nodes", {})
@@ -210,7 +343,6 @@ def _try_infer_owner(
     best_score: float = 0.0
     best_confidence: float = 0.0
 
-    # Count how many course nodes (has_file=True) appear in this followers file
     course_nodes_in_file = sum(
         1 for u in usernames_in_file
         if known_nodes.get(u, {}).get("has_file", False)
@@ -241,12 +373,7 @@ def _try_infer_owner(
 # ─── Rename anonymous node ───────────────────────────────────────────────────
 
 def _rename_node(graph_data: dict, old_label: str, new_label: str):
-    """
-    Renames a node in graph_data in-place:
-    - moves node dict from old_label to new_label
-    - updates all edges referencing old_label
-    - clears is_anonymous flag
-    """
+    """Renames a node key and updates all edges referencing it."""
     if old_label not in graph_data["nodes"]:
         return
     node = graph_data["nodes"].pop(old_label)
@@ -267,6 +394,8 @@ def process_file(
     source_name: str,
     declared_owner: Optional[str] = None,
     forced_file_type: Optional[str] = None,
+    is_incompleto: bool = False,
+    _skip_completeness: bool = False,
 ) -> dict:
     """
     Procesa un archivo JSON de Instagram.
@@ -275,11 +404,12 @@ def process_file(
     - status: 'added' | 'duplicate' | 'error' | 'anonymous'
     - message: descripción del resultado
     - file_id: hash del archivo
-    - owner: username resuelto (o None para archivos aún sin owner)
+    - owner: username resuelto
+    - file_type: 'following' | 'followers'
     """
     data, error = _load_json(content)
     if error:
-        return {"status": "error", "message": f"JSON inválido: {error}", "file_id": None, "owner": None}
+        return {"status": "error", "message": f"JSON inválido: {error}", "file_id": None, "owner": None, "file_type": None}
 
     file_type = forced_file_type or _detect_file_type(data)
     if not file_type:
@@ -288,6 +418,7 @@ def process_file(
             "message": "Formato no reconocido. Se esperaba 'relationships_following', 'relationships_followers', o array raíz de Instagram.",
             "file_id": None,
             "owner": None,
+            "file_type": None,
         }
 
     file_id = _stable_id(data)
@@ -299,6 +430,7 @@ def process_file(
             "message": f"Archivo duplicado. Ya procesado el {registry[file_id]['ingested_at']} (owner: {registry[file_id].get('owner', 'desconocido')}).",
             "file_id": file_id,
             "owner": registry[file_id].get("owner"),
+            "file_type": file_type,
         }
 
     relations = _extract_relations(data, file_type)
@@ -369,7 +501,6 @@ def process_file(
             })
 
     if is_anonymous_node:
-        # Store in anonymous queue for future resolution
         graph_data["anonymous_files"].append({
             "file_id": file_id,
             "file_type": file_type,
@@ -378,7 +509,6 @@ def process_file(
             "assigned_owner": assigned_anon_label,
         })
     else:
-        # Try to resolve previously queued anonymous files
         _resolve_anonymous(graph_data, registry)
 
     save_graph_data(graph_data)
@@ -391,7 +521,14 @@ def process_file(
         "inference_confidence": round(inference_confidence, 4),
         "relation_count": len(relations),
         "ingested_at": datetime.now().isoformat(timespec="seconds"),
+        "is_complete": None,   # filled in by update_completeness_after_ingestion
+        "incompleto": is_incompleto,
     }
+
+    # Update completeness only for non-anonymous owners (unless caller defers it)
+    if not is_anonymous_node and not _skip_completeness:
+        update_completeness_after_ingestion(owner, registry)
+
     save_registry(registry)
 
     status = "anonymous" if is_anonymous_node else "added"
@@ -402,7 +539,7 @@ def process_file(
         + (f" Sin owner identificado — asignado como @{assigned_anon_label} para resolución futura." if is_anonymous_node else "")
     )
 
-    return {"status": status, "message": msg, "file_id": file_id, "owner": owner}
+    return {"status": status, "message": msg, "file_id": file_id, "owner": owner, "file_type": file_type}
 
 
 def _resolve_anonymous(graph_data: dict, registry: Optional[dict] = None):
@@ -421,11 +558,9 @@ def _resolve_anonymous(graph_data: dict, registry: Optional[dict] = None):
         real_owner, confidence = _try_infer_owner(relations, file_type, graph_data)
 
         if real_owner and real_owner != assigned_owner:
-            # Rename the placeholder node to the real owner
             if assigned_owner and assigned_owner in graph_data["nodes"]:
                 _rename_node(graph_data, assigned_owner, real_owner)
             else:
-                # Node wasn't created yet — build it now
                 relation_usernames = [r["username"] for r in relations]
                 timestamps = {r["username"]: r["timestamp"] for r in relations}
                 if real_owner not in graph_data["nodes"]:
@@ -448,7 +583,6 @@ def _resolve_anonymous(graph_data: dict, registry: Optional[dict] = None):
                         graph_data["edges"].append({"source": u, "target": real_owner, "timestamp": timestamps.get(u, 0)})
                     graph_data["nodes"][real_owner]["followers"] = list(existing | set(relation_usernames))
 
-            # Update registry
             file_id = anon["file_id"]
             if file_id in registry:
                 registry[file_id]["owner"] = real_owner
@@ -465,10 +599,10 @@ def _resolve_anonymous(graph_data: dict, registry: Optional[dict] = None):
 
 # ─── Escaneo de carpetas locales ──────────────────────────────────────────────
 
-def _scan_subfolder(folder: Path, forced_file_type: str) -> list[dict]:
+def _scan_subfolder(folder: Path, forced_file_type: str, is_incompleto: bool = False) -> list[dict]:
     """
-    Escanea una subcarpeta (following/ o followers/) y procesa todos los JSON.
-    El tipo de archivo viene forzado por la carpeta; no se detecta automáticamente.
+    Escanea una subcarpeta y procesa todos los JSON.
+    El tipo de archivo viene forzado por la carpeta.
     El owner se infiere del nombre del archivo usando _extract_owner_from_stem.
     """
     if not folder.exists():
@@ -487,6 +621,7 @@ def _scan_subfolder(folder: Path, forced_file_type: str) -> list[dict]:
             source_name=filepath.name,
             declared_owner=owner,
             forced_file_type=forced_file_type,
+            is_incompleto=is_incompleto,
         )
         result["source_name"] = filepath.name
         results.append(result)
@@ -496,11 +631,84 @@ def _scan_subfolder(folder: Path, forced_file_type: str) -> list[dict]:
 
 def scan_local_folder() -> list[dict]:
     """
-    Escanea data/raw/following/ y data/raw/followers/ independientemente.
-    Los archivos en following/ se tratan como 'following'; los de followers/ como 'followers'.
+    Escanea data/raw/following/, data/raw/followers/,
+    data/incompleto/following/ y data/incompleto/followers/.
     Retorna lista unificada de resultados por archivo.
     """
     results = []
-    results.extend(_scan_subfolder(RAW_FOLLOWING_PATH, "following"))
-    results.extend(_scan_subfolder(RAW_FOLLOWERS_PATH, "followers"))
+    results.extend(_scan_subfolder(RAW_FOLLOWING_PATH, "following", is_incompleto=False))
+    results.extend(_scan_subfolder(RAW_FOLLOWERS_PATH, "followers", is_incompleto=False))
+    results.extend(_scan_subfolder(INC_FOLLOWING_PATH, "following", is_incompleto=True))
+    results.extend(_scan_subfolder(INC_FOLLOWERS_PATH, "followers", is_incompleto=True))
     return results
+
+
+# ─── Upload emparejado ────────────────────────────────────────────────────────
+
+def process_paired_upload(
+    username: str,
+    following_content: Optional[bytes],
+    following_name: str,
+    followers_content: Optional[bytes],
+    followers_name: str,
+) -> dict:
+    """
+    Procesa un par de archivos subidos juntos con un username declarado.
+
+    Saves files to disk first with canonical names, then processes them.
+    Completeness is evaluated once after both files are handled.
+
+    Returns:
+    {
+      "results": [result_dict, ...],   # one per file processed
+      "is_complete": bool,
+      "owner": str,
+    }
+    """
+    owner = username.strip().lower()
+    results = []
+
+    # Save to disk first with canonical names so completeness moves can find them
+    following_disk_name: Optional[str] = None
+    followers_disk_name: Optional[str] = None
+
+    if following_content:
+        RAW_FOLLOWING_PATH.mkdir(parents=True, exist_ok=True)
+        following_disk_name = f"following_{owner}.json"
+        (RAW_FOLLOWING_PATH / following_disk_name).write_bytes(following_content)
+
+    if followers_content:
+        RAW_FOLLOWERS_PATH.mkdir(parents=True, exist_ok=True)
+        followers_disk_name = f"followers_{owner}.json"
+        (RAW_FOLLOWERS_PATH / followers_disk_name).write_bytes(followers_content)
+
+    # Process files (skip per-file completeness; we'll do it once at the end)
+    if following_content and following_disk_name:
+        r = process_file(
+            following_content,
+            source_name=following_disk_name,
+            declared_owner=owner,
+            forced_file_type="following",
+            _skip_completeness=True,
+        )
+        results.append(r)
+
+    if followers_content and followers_disk_name:
+        r = process_file(
+            followers_content,
+            source_name=followers_disk_name,
+            declared_owner=owner,
+            forced_file_type="followers",
+            _skip_completeness=True,
+        )
+        results.append(r)
+
+    # Single completeness evaluation after all files are processed
+    registry = load_registry()
+    completeness = get_completeness(registry)
+    is_complete = owner in completeness["complete"]
+
+    update_completeness_after_ingestion(owner, registry)
+    save_registry(registry)
+
+    return {"results": results, "is_complete": is_complete, "owner": owner}
