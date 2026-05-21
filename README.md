@@ -1,6 +1,9 @@
-# Social Graph · Curso
+# Social Graph
 
-Análisis de grafo social de Instagram para el grupo del curso. Visualización interactiva con Sigma.js + NetworkX.
+Nombres: 
+- Camilo López
+- Juan Márquez
+- Nicolás Ramirez
 
 ## Setup
 
