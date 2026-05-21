@@ -52,25 +52,30 @@ def validate_rename(old_username: str, new_username: str) -> Optional[str]:
     if old_username not in graph_data.get("nodes", {}):
         return f"@{old_username} no existe en el grafo."
 
-    if new_username in graph_data.get("nodes", {}):
-        return (
-            f"@{new_username} ya existe en el grafo. "
-            "Renombrar hacia un nodo existente no está soportado — "
-            "primero elimina o fusiona manualmente."
-        )
-
     return None
 
 
 # ── Rename en graph_data ──────────────────────────────────────────────────────
 
 def _rename_in_graph(graph_data: dict, old: str, new: str):
-    """Renombra old → new en nodos, listas de relaciones y arcos."""
+    """
+    Renombra old → new en nodos, listas de relaciones y arcos.
+    Si new ya existe, fusiona: los atributos de old (has_file, etc.) se
+    preservan en new y el nodo old desaparece.
+    """
     nodes = graph_data["nodes"]
 
-    # 1. Renombrar la clave del nodo principal
+    # 1. Renombrar/fusionar la clave del nodo principal
     if old in nodes:
-        nodes[new] = nodes.pop(old)
+        if new in nodes:
+            # Fusión: el nodo destino ya existe — heredar atributos del curso
+            # (has_file, following, followers) que el nodo externo no tiene.
+            old_data = nodes.pop(old)
+            for key in ("has_file", "following", "followers"):
+                if key in old_data:
+                    nodes[new][key] = old_data[key]
+        else:
+            nodes[new] = nodes.pop(old)
 
     # 2. Actualizar listas following/followers — solo en nodos que realmente
     #    contienen la referencia (evita iterar los 3k nodos cuando solo unos
@@ -259,6 +264,8 @@ def preview_rename(old_username: str, new_username: str) -> dict:
     graph_data = load_graph_data()
     registry   = load_registry()
 
+    is_merge = new in graph_data.get("nodes", {})
+
     edges_affected = sum(
         1 for e in graph_data.get("edges", [])
         if e["source"] == old or e["target"] == old
@@ -275,6 +282,7 @@ def preview_rename(old_username: str, new_username: str) -> dict:
     return {
         "valid":          True,
         "error":          None,
+        "is_merge":        is_merge,
         "edges_affected":  edges_affected,
         "nodes_affected":  nodes_affected,
         "files_affected":  files_affected,

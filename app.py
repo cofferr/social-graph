@@ -383,7 +383,9 @@ if anon_files:
     )
 
 # ── Pestañas principales ──────────────────────────────────────────────────────
-tab_grafo, tab_analisis, tab_gestion = st.tabs(["Grafo", "Análisis", "Gestión"])
+tab_grafo, tab_analisis, tab_gestion = st.tabs(
+    ["Grafo", "Análisis", "Gestión"]
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -756,6 +758,11 @@ with tab_gestion:
         if not preview["valid"]:
             st.error(f"⚠️ {preview['error']}")
         else:
+            if preview.get("is_merge"):
+                st.info(
+                    f"ℹ️ **@{new_user} ya existe en el grafo** — se realizará una fusión: "
+                    f"los atributos del curso de @{old_user} pasarán a @{new_user} y el nodo @{old_user} desaparecerá."
+                )
             st.markdown("**Impacto del cambio:**")
             pc1, pc2, pc3 = st.columns(3)
             pc1.metric("Arcos afectados", preview["edges_affected"])
