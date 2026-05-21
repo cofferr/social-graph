@@ -371,9 +371,20 @@ let isolationMode  = null;
 let isolatedNodes  = new Set();
 let hiddenNodes    = new Set();
 
+// Cache de vecinos para evitar recalcular en cada frame del nodeReducer
+let neighborCache  = null;
+
 // Flag anti-recursión: evita que closePanel → exitIsolation → applyFilter
 // vuelva a llamar closePanel si selectedNode quedó en hiddenNodes
 let _applyingFilter = false;
+
+function buildNeighborCache(nodeId) {{
+  if (!nodeId) {{ neighborCache = null; return; }}
+  neighborCache = new Set([
+    ...graph.outNeighbors(nodeId),
+    ...graph.inNeighbors(nodeId),
+  ]);
+}}
 
 // ── Grafo ─────────────────────────────────────────────────────────────────────
 const graph = new graphology.Graph({{ type: 'directed', multi: false }});
@@ -394,9 +405,11 @@ GRAPH_DATA.edges.forEach(e => {{
   try {{
     // Preservar el color semántico calculado en el backend (puentes vs externos)
     const edgeColor = e.color || "rgba(255,255,255,0.015)";
-    const edgeSize  = (e.edge_type === "course_to_course") ? 1.2
-                    : (e.edge_type === "bridge_to_course")  ? 0.6
-                    : 0.1;
+    const edgeSize  = (e.edge_type === "course_to_course")    ? 1.4
+                    : (e.edge_type === "bridge_to_course")    ? 0.7
+                    : (e.edge_type === "course_to_external")  ? 0.5
+                    : (e.edge_type === "bridge_to_bridge")    ? 0.2
+                    : 0.08;
     graph.addEdge(e.source, e.target, {{
       ...e,
       size:          edgeSize,
@@ -409,32 +422,39 @@ GRAPH_DATA.edges.forEach(e => {{
 // ── Renderer ──────────────────────────────────────────────────────────────────
 const renderer = new Sigma(graph, document.getElementById("sigma-container"), {{
   renderEdgeLabels: false,
-  defaultEdgeColor: "rgba(255,255,255,0.03)",
+  defaultEdgeColor: "rgba(255,255,255,0.015)",
   labelFont: "Space Mono, monospace",
   labelSize: 11,
   labelColor: {{ color: "rgba(255,255,255,0.8)" }},
+  // LOD: hide labels below this zoom ratio to reduce clutter
+  labelRenderedSizeThreshold: 6,
+  // Skip rendering tiny nodes when zoomed out (performance)
+  nodeProgramClasses: {{}},
   edgeReducer: (edge, data) => {{
     const res = {{ ...data }};
     const src = graph.source(edge);
     const tgt = graph.target(edge);
     if (hiddenNodes.has(src) || hiddenNodes.has(tgt)) {{
       res.hidden = true;
-      res.color  = "transparent";
       return res;
     }}
     res.hidden = false;
     if (selectedNode) {{
       if (src === selectedNode || tgt === selectedNode) {{
-        // Arcos del nodo seleccionado: destacar por dirección
         res.color = src === selectedNode ? "#7c6fff" : "#e63946";
         res.size  = 2.5;
       }} else {{
-        // Resto: casi invisible para no distraer
-        res.color = "rgba(255,255,255,0.004)";
-        res.size  = 0.08;
+        res.hidden = true;
+      }}
+    }} else if (hoveredNode) {{
+      if (src === hoveredNode || tgt === hoveredNode) {{
+        res.color = src === hoveredNode ? "#7c6fff" : "#e63946";
+        res.size  = 1.5;
+      }} else {{
+        res.color = "rgba(255,255,255,0.006)";
+        res.size  = 0.05;
       }}
     }} else {{
-      // Sin selección: usar el color semántico del backend
       res.color = data.originalColor || "rgba(255,255,255,0.015)";
       res.size  = data.size || 0.1;
     }}
@@ -449,32 +469,29 @@ const renderer = new Sigma(graph, document.getElementById("sigma-container"), {{
     }}
     res.hidden = false;
 
+    // Dim non-neighbors when a node is selected (use cached set)
     if (selectedNode && node !== selectedNode) {{
-      const neighbors = new Set([
-        ...graph.outNeighbors(selectedNode),
-        ...graph.inNeighbors(selectedNode),
-      ]);
-      if (!neighbors.has(node)) {{
-        res.color = "rgba(40,40,60,0.12)";
+      if (!neighborCache || !neighborCache.has(node)) {{
+        res.color = "rgba(30,30,50,0.18)";
         res.label = "";
-        res.size  = data.originalSize * 0.4;
+        res.size  = data.originalSize * 0.35;
         return res;
       }}
     }}
 
-    // Nodos del curso: siempre visibles con borde
+    // Course nodes: always labelled with white border ring
     if (data.has_file) {{
       res.label       = node;
       res.borderColor = "#ffffff";
       res.borderSize  = 0.3;
+      res.highlighted = true;
       return res;
     }}
 
-    // Nodos puente (seguidores compartidos entre estudiantes): ligeramente más visibles
+    // Bridge nodes: subtle ring, label only when important
     if (data.is_bridge) {{
       res.borderColor = data.originalColor;
-      res.borderSize  = 0.15;
-      // Mostrar etiqueta solo si está destacado o es muy importante
+      res.borderSize  = 0.12;
       if (node === hoveredNode || node === selectedNode || data.pagerank > 0.015) {{
         res.label = node;
       }} else {{
@@ -483,9 +500,10 @@ const renderer = new Sigma(graph, document.getElementById("sigma-container"), {{
       return res;
     }}
 
-    // Nodos externos normales: etiqueta solo si pagerank alto
-    const isImportant = data.pagerank > 0.02;
-    if (!isImportant && node !== hoveredNode && node !== selectedNode) res.label = "";
+    // External nodes: label only at high pagerank
+    if (data.pagerank <= 0.02 && node !== hoveredNode && node !== selectedNode) {{
+      res.label = "";
+    }}
     return res;
   }},
 }});
@@ -600,35 +618,29 @@ function applyFilter() {{
 function _closePanelInternal() {{
   document.getElementById("panel").classList.remove("open");
   selectedNode = null;
+  neighborCache = null;
   resetHighlight();
 }}
 
 // ── Highlight ─────────────────────────────────────────────────────────────────
+// highlightNode modifica atributos del grafo para persistir el estado al hacer
+// click; el hover solo usa el reducer sin modificar atributos (más rápido).
 function highlightNode(nodeId) {{
-  const neighbors = new Set([...graph.outNeighbors(nodeId), ...graph.inNeighbors(nodeId)]);
+  const neighbors = neighborCache || new Set([...graph.outNeighbors(nodeId), ...graph.inNeighbors(nodeId)]);
   graph.forEachNode((n, attrs) => {{
     if (hiddenNodes.has(n)) return;
     if (n === nodeId) {{
       graph.setNodeAttribute(n, "color", "#ffffff");
-      graph.setNodeAttribute(n, "size", attrs.originalSize * 1.6);
+      graph.setNodeAttribute(n, "size", attrs.originalSize * 1.8);
     }} else if (neighbors.has(n)) {{
       graph.setNodeAttribute(n, "color", attrs.originalColor);
-      graph.setNodeAttribute(n, "size", attrs.originalSize);
+      graph.setNodeAttribute(n, "size", attrs.originalSize * 1.1);
     }} else {{
-      graph.setNodeAttribute(n, "color", "rgba(255,255,255,0.06)");
-      graph.setNodeAttribute(n, "size",  attrs.originalSize * 0.6);
+      graph.setNodeAttribute(n, "color", "rgba(30,30,50,0.18)");
+      graph.setNodeAttribute(n, "size",  attrs.originalSize * 0.35);
     }}
   }});
-  graph.forEachEdge((edge, attrs, source, target) => {{
-    if (hiddenNodes.has(source) || hiddenNodes.has(target)) return;
-    if (source === nodeId || target === nodeId) {{
-      graph.setEdgeAttribute(edge, "color", source === nodeId ? "#7c6fff" : "#e63946");
-      graph.setEdgeAttribute(edge, "size", 2);
-    }} else {{
-      graph.setEdgeAttribute(edge, "color", "rgba(255,255,255,0.02)");
-      graph.setEdgeAttribute(edge, "size", 0.5);
-    }}
-  }});
+  renderer.refresh();
 }}
 
 function resetHighlight() {{
@@ -640,8 +652,8 @@ function resetHighlight() {{
   }});
   graph.forEachEdge((edge, attrs, source, target) => {{
     if (!hiddenNodes.has(source) && !hiddenNodes.has(target)) {{
-      graph.setEdgeAttribute(edge, "color", "rgba(255,255,255,0.06)");
-      graph.setEdgeAttribute(edge, "size", 1);
+      graph.setEdgeAttribute(edge, "color", attrs.originalColor || "rgba(255,255,255,0.015)");
+      graph.setEdgeAttribute(edge, "size", attrs.size || 0.1);
     }}
   }});
 }}
@@ -652,6 +664,7 @@ const panel = document.getElementById("panel");
 function openPanel(nodeId) {{
   const attrs = graph.getNodeAttributes(nodeId);
   selectedNode = nodeId;
+  buildNeighborCache(nodeId);
   document.getElementById("p-username").textContent = nodeId;
   const badge = document.getElementById("p-badge");
   badge.textContent = attrs.is_anonymous ? "ANON" : (attrs.has_file ? "CURSO" : "EXTERNO");
@@ -692,6 +705,7 @@ function openPanel(nodeId) {{
 function closePanel() {{
   panel.classList.remove("open");
   selectedNode = null;
+  neighborCache = null;
   exitIsolation(true);
   resetHighlight();
 }}
@@ -754,11 +768,17 @@ document.getElementById("btn-isolate-community").onclick = () => {{
 // ── Eventos del renderer ──────────────────────────────────────────────────────
 renderer.on("enterNode", ({{ node }}) => {{
   hoveredNode = node;
-  if (!selectedNode) highlightNode(node);
+  if (!selectedNode) {{
+    buildNeighborCache(node);
+    renderer.refresh();
+  }}
 }});
 renderer.on("leaveNode", () => {{
   hoveredNode = null;
-  if (!selectedNode) resetHighlight();
+  if (!selectedNode) {{
+    neighborCache = null;
+    renderer.refresh();
+  }}
 }});
 renderer.on("clickNode", ({{ node }}) => {{
   if (selectedNode === node) closePanel(); else openPanel(node);

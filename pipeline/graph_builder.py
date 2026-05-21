@@ -152,126 +152,102 @@ def _assign_owner_community(G: nx.DiGraph) -> dict:
 
 def _community_aware_layout(G_ud: nx.Graph, communities: dict, seed: int = 42) -> dict:
     """
-    Layout en tres fases que garantiza separación visual entre comunidades.
+    Layout rápido y visualmente claro para grafos de hasta decenas de miles de nodos.
 
-    Fase 1 — Macro-posiciones de comunidades:
-      Cada comunidad recibe un centro en una cuadrícula/círculo de comunidades,
-      escalado por el tamaño de la comunidad. Esto crea el "espacio" para que
-      spring_layout no los mezcle.
-
-    Fase 2 — Spring local por comunidad:
-      Dentro de cada comunidad, spring_layout con k grande para dispersar nodos.
-      Las posiciones iniciales se centran en el macro-centro de su comunidad.
-
-    Fase 3 — Interpolación para nodos sin vecinos posicionados:
-      Igual que antes — centroide ponderado + jitter radial.
-
-    El resultado: comunidades claramente separadas, con estructura interna
-    natural, y nodos puente posicionados entre sus comunidades.
+    Estrategia (sin spring_layout global, que es O(n²)):
+    1. Course nodes en círculo externo amplio — posiciones fijas.
+    2. Cada nodo externo se posiciona cerca del centroide de sus vecinos de curso.
+       Si no tiene vecinos de curso, se ubica en el sub-círculo de su comunidad.
+    3. Dispersión radial según número de vecinos (nodos más conectados al centro).
+    4. Para grafos pequeños (≤800 nodos) se añade un spring_layout local
+       por comunidad para mejorar la separación interna.
     """
     rng = _random.Random(seed)
 
-    # Agrupar nodos por comunidad
-    from collections import defaultdict
-    comm_nodes: dict[int, list] = defaultdict(list)
-    for node, cid in communities.items():
-        if G_ud.has_node(node):
-            comm_nodes[cid].append(node)
+    course_nodes_list = sorted(n for n, d in G_ud.nodes(data=True) if d.get("has_file"))
+    course_set = set(course_nodes_list)
+    n_course = len(course_nodes_list)
 
-    n_comms = len(comm_nodes)
-    if n_comms == 0:
-        return {n: (rng.gauss(0, 1), rng.gauss(0, 1)) for n in G_ud.nodes()}
+    if n_course == 0:
+        return nx.spring_layout(G_ud, k=2.0, iterations=50, seed=seed)
 
-    # ── Fase 1: macro-posiciones de comunidades ───────────────────────────────
-    # spread grande para que los clusters queden bien separados entre sí.
-    # El radio base de cada cluster es proporcional a su tamaño para dar espacio real.
-    comm_centers: dict[int, tuple] = {}
-    sorted_comms = sorted(comm_nodes.keys(), key=lambda c: len(comm_nodes[c]), reverse=True)
+    n_total = G_ud.number_of_nodes()
+    macro_radius = max(50.0, math.sqrt(n_total) * 3.5)
 
-    # Spread entre centros de comunidad — aumentado para separar clusters
-    spread = max(12.0, math.sqrt(n_comms) * 6.0)
+    # 1. Posiciones de nodos del curso en círculo
+    pos: dict[str, _np.ndarray] = {}
+    for i, node in enumerate(course_nodes_list):
+        angle = 2 * math.pi * i / n_course
+        pos[node] = _np.array([macro_radius * math.cos(angle), macro_radius * math.sin(angle)])
 
-    for i, cid in enumerate(sorted_comms):
-        angle = 2 * math.pi * i / n_comms
-        # Radio proporcional al tamaño de la comunidad
-        size_factor = math.sqrt(len(comm_nodes[cid]) / max(1, len(G_ud)))
-        r = spread * (0.8 + 0.5 * size_factor)
-        comm_centers[cid] = (r * math.cos(angle), r * math.sin(angle))
+    # Precalcular vecinos de curso por nodo externo (una sola pasada)
+    course_neighbor_pos: dict[str, list] = {}  # node → [pos arrays of course neighbors]
+    for c in course_nodes_list:
+        for nb in G_ud.neighbors(c):
+            if nb not in course_set:
+                course_neighbor_pos.setdefault(nb, []).append(pos[c])
 
-    # ── Fase 2: spring local dentro de cada comunidad ─────────────────────────
-    pos: dict = {}
-    degrees = dict(G_ud.degree())
+    # Mapa comunidad → posición de curso más representativa
+    comm_anchor: dict[int, _np.ndarray] = {}
+    for c in course_nodes_list:
+        cid = communities.get(c, 0)
+        if cid not in comm_anchor:
+            comm_anchor[cid] = pos[c]
 
-    for cid, nodes in comm_nodes.items():
-        cx, cy = comm_centers[cid]
-        n = len(nodes)
+    # Comunidades sin curso: asignar posición en anillo exterior
+    all_comms = set(communities.values())
+    missing_comms = all_comms - set(comm_anchor.keys())
+    for k, cid in enumerate(sorted(missing_comms)):
+        angle = 2 * math.pi * k / max(len(missing_comms), 1)
+        comm_anchor[cid] = _np.array([
+            macro_radius * 1.6 * math.cos(angle),
+            macro_radius * 1.6 * math.sin(angle),
+        ])
 
-        if n == 1:
-            pos[nodes[0]] = (cx, cy)
+    # 2. Posición de nodos externos
+    for node in G_ud.nodes():
+        if node in pos:
             continue
+        cid = communities.get(node, 0)
+        anchor = comm_anchor.get(cid, _np.zeros(2))
 
-        sub = G_ud.subgraph(nodes).copy()
-
-        # Radio del cluster más grande para dispersar nodos internamente
-        cluster_r = max(2.5, math.sqrt(n) * 0.9)
-
-        # Posiciones iniciales: mini-círculo centrado en comm_center
-        init_pos = {}
-        for j, node in enumerate(sorted(nodes, key=lambda x: -degrees.get(x, 0))):
-            a = 2 * math.pi * j / n
-            init_pos[node] = (
-                cx + cluster_r * math.cos(a) * rng.uniform(0.6, 1.0),
-                cy + cluster_r * math.sin(a) * rng.uniform(0.6, 1.0),
-            )
-
-        # k grande = más repulsión interna entre nodos del mismo cluster
-        k_val = max(1.5, cluster_r * 3.0 / math.sqrt(n))
-
-        try:
-            sub_pos = nx.spring_layout(
-                sub,
-                k=k_val,
-                iterations=120,
-                seed=seed + cid,
-                weight="weight",
-                pos=init_pos,
-                center=(cx, cy),
-                scale=cluster_r,
-            )
-            pos.update(sub_pos)
-        except Exception:
-            for node, p in init_pos.items():
-                pos[node] = p
-
-    # ── Fase 3: nodos no posicionados (componentes aisladas) ──────────────────
-    remaining = [n for n in G_ud.nodes() if n not in pos]
-    xs = [v[0] for v in pos.values()] if pos else [0]
-    ys = [v[1] for v in pos.values()] if pos else [0]
-    bbox_diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys)) or 1.0
-
-    for _ in range(3):
-        still = []
-        for node in remaining:
-            nb_pos = [(pos[nb], degrees.get(nb, 1))
-                      for nb in G_ud.neighbors(node) if nb in pos]
-            if not nb_pos:
-                still.append(node)
-                continue
-            total_w = sum(w for _, w in nb_pos)
-            cx = sum(p[0] * w for p, w in nb_pos) / total_w
-            cy = sum(p[1] * w for p, w in nb_pos) / total_w
-            jitter = bbox_diag * 0.04 / max(1, math.log1p(len(nb_pos)))
+        if node in course_neighbor_pos:
+            pts = course_neighbor_pos[node]
+            center = _np.mean(pts, axis=0)
+            # Dispersión relativa al radio macro: nodos con un solo hub
+            # se dispersan más; nodos puente (múltiples hubs) se colocan
+            # entre ellos con menor dispersión para no alejarse del centro.
+            n_hubs = len(pts)
+            spread = macro_radius * (0.30 if n_hubs == 1 else 0.18 / n_hubs + 0.08)
+            angle_r = rng.uniform(0, 2 * math.pi)
+            r = rng.uniform(spread * 0.3, spread)
+            pos[node] = center + _np.array([r * math.cos(angle_r), r * math.sin(angle_r)])
+        else:
+            # Sin vecinos de curso: sub-anillo alrededor del anchor de comunidad
             angle = rng.uniform(0, 2 * math.pi)
-            pos[node] = (cx + math.cos(angle) * jitter, cy + math.sin(angle) * jitter)
-        remaining = still
+            r = rng.uniform(macro_radius * 0.08, macro_radius * 0.55)
+            pos[node] = anchor + _np.array([r * math.cos(angle), r * math.sin(angle)])
 
-    margin = bbox_diag * 0.1
-    x_lo, x_hi = min(xs) - margin, max(xs) + margin
-    y_lo, y_hi = min(ys) - margin, max(ys) + margin
-    for node in remaining:
-        pos[node] = (rng.uniform(x_lo, x_hi), rng.uniform(y_lo, y_hi))
+    # 3. Para grafos pequeños: refinamiento local por comunidad con spring_layout
+    if n_total <= 800:
+        from collections import defaultdict
+        comm_groups: dict[int, list] = defaultdict(list)
+        for node in G_ud.nodes():
+            comm_groups[communities.get(node, 0)].append(node)
 
-    return pos
+        for cid, members in comm_groups.items():
+            if len(members) < 3:
+                continue
+            sub = G_ud.subgraph(members)
+            init = {m: pos[m] for m in members}
+            try:
+                refined = nx.spring_layout(sub, pos=init, iterations=25, seed=seed, k=3.0)
+                for m, p in refined.items():
+                    pos[m] = p
+            except Exception:
+                pass
+
+    return {node: (float(p[0]), float(p[1])) for node, p in pos.items()}
 
 
 # ── Helpers de color ──────────────────────────────────────────────────────────
@@ -301,28 +277,44 @@ def compute_metrics(G: nx.DiGraph) -> dict:
     out_deg = dict(G.out_degree())
     G_ud    = G.to_undirected()
 
+    n = G.number_of_nodes()
+
     try:
-        k_sample = min(300, G.number_of_nodes())
+        # k=min(200, n) gives a fast approximation; exact only for small graphs
+        k_sample = min(200, n)
         betweenness = nx.betweenness_centrality(
             G, normalized=True, weight="weight", k=k_sample, seed=42
         )
     except Exception:
-        betweenness = {n: 0.0 for n in G.nodes()}
+        betweenness = {node: 0.0 for node in G.nodes()}
 
     try:
-        pagerank = nx.pagerank(G, alpha=0.85, weight="weight")
+        pagerank = nx.pagerank(G, alpha=0.85, weight="weight", max_iter=50)
     except Exception:
-        pagerank = {n: 0.0 for n in G.nodes()}
+        pagerank = {node: 0.0 for node in G.nodes()}
 
     try:
-        closeness = nx.closeness_centrality(G)
+        # closeness_centrality is O(n*m) — skip for large graphs
+        if n <= 1500:
+            closeness = nx.closeness_centrality(G)
+        else:
+            # Approximate: sample 300 sources, scale by reachability
+            sample = list(G.nodes())[:300]
+            closeness = {node: 0.0 for node in G.nodes()}
+            for s in sample:
+                lengths = nx.single_source_shortest_path_length(G, s)
+                for t, d in lengths.items():
+                    if d > 0:
+                        closeness[t] += 1.0 / d
+            max_c = max(closeness.values()) or 1
+            closeness = {node: v / max_c for node, v in closeness.items()}
     except Exception:
-        closeness = {n: 0.0 for n in G.nodes()}
+        closeness = {node: 0.0 for node in G.nodes()}
 
     try:
         clustering = nx.clustering(G_ud)
     except Exception:
-        clustering = {n: 0.0 for n in G.nodes()}
+        clustering = {node: 0.0 for node in G.nodes()}
 
     communities       = _compute_communities(G)
     owner_communities = _assign_owner_community(G)
@@ -393,6 +385,18 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
     max_pr    = max(pageranks) if pageranks else 1
     min_pr    = min(pageranks) if pageranks else 0
     pr_range  = max_pr - min_pr if max_pr != min_pr else 1
+    max_bt    = max((per_node[n]["betweenness"] for n in G.nodes() if n in per_node), default=1) or 1
+
+    # Precalcular bridge_set antes del loop para usarlo en el tamaño de nodo
+    course_list_pre = sorted(course_nodes)
+    _course_nbrs_pre: dict[str, set] = {
+        c: (set(G.predecessors(c)) | set(G.successors(c))) - course_nodes
+        for c in course_list_pre
+    }
+    bridge_set_pre: set[str] = set()
+    for i in range(len(course_list_pre)):
+        for j in range(i + 1, len(course_list_pre)):
+            bridge_set_pre |= _course_nbrs_pre[course_list_pre[i]] & _course_nbrs_pre[course_list_pre[j]]
 
     sigma_nodes = []
     for node in G.nodes():
@@ -402,12 +406,19 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
 
         has_file     = G.nodes[node].get("has_file", False)
         is_anonymous = G.nodes[node].get("is_anonymous", False)
+        is_bridge    = node in bridge_set_pre
 
-        # Tamaño por PageRank — course nodes con rango mínimo mayor
+        # Tamaño por PageRank escalado por categoría
+        bt = nm.get("betweenness", 0)
         if has_file:
-            size = 8 + 12 * (pr - min_pr) / pr_range
+            size = 10 + 16 * (pr - min_pr) / pr_range
+        elif is_bridge:
+            # Puentes: tamaño base mayor + escala por betweenness (mejor discriminador)
+            size = 5 + 8 * (bt / max_bt if max_bt > 0 else 0)
+        elif is_anonymous:
+            size = 2 + 5 * (pr - min_pr) / pr_range
         else:
-            size = 3 + 8 * (pr - min_pr) / pr_range
+            size = 3 + 9 * (pr - min_pr) / pr_range
 
         # Color modo estructural (Louvain)
         if has_file:
@@ -446,26 +457,16 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
             "clustering":    nm.get("clustering", 0),
         })
 
-    # Seguidores compartidos entre pares de estudiantes:
-    # Para cada par (A, B) de course nodes, encontrar nodos externos
-    # que siguen a ambos o son seguidos por ambos.
-    # Estos nodos se marcan is_bridge=True y se posicionan entre A y B.
-    course_list = sorted(course_nodes)
-    shared_followers: dict[str, set] = {}   # node_id → set of course pairs it bridges
-    for i in range(len(course_list)):
-        for j in range(i + 1, len(course_list)):
-            a, b = course_list[i], course_list[j]
-            # Nodos externos que conectan a A y B (en cualquier dirección)
-            neighbors_a = set(G.predecessors(a)) | set(G.successors(a))
-            neighbors_b = set(G.predecessors(b)) | set(G.successors(b))
-            shared = (neighbors_a & neighbors_b) - course_nodes
-            for node in shared:
-                if node not in shared_followers:
-                    shared_followers[node] = set()
-                shared_followers[node].add(f"{a}↔{b}")
+    # Reutilizar los dicts precalculados (_course_nbrs_pre, bridge_set_pre)
+    # para construir el mapa node → pares que puentea.
+    shared_followers: dict[str, set] = {}
+    for i in range(len(course_list_pre)):
+        for j in range(i + 1, len(course_list_pre)):
+            a, b = course_list_pre[i], course_list_pre[j]
+            for node in _course_nbrs_pre[a] & _course_nbrs_pre[b]:
+                shared_followers.setdefault(node, set()).add(f"{a}↔{b}")
 
-    # Actualizar atributo bridge en los nodos sigma ya construidos
-    bridge_set = set(shared_followers.keys())
+    bridge_set = bridge_set_pre
     for sn in sigma_nodes:
         sn["is_bridge"] = sn["id"] in bridge_set
         sn["bridges"] = list(shared_followers.get(sn["id"], set()))
@@ -477,20 +478,24 @@ def graph_to_sigma_format(G: nx.DiGraph, metrics: dict) -> dict:
         src_bridge = src in bridge_set
         tgt_bridge = tgt in bridge_set
 
-        # Arco entre dos estudiantes: muy visible
+        # Arco entre dos estudiantes: máximo contraste
         if src_course and tgt_course:
-            color = "rgba(255,255,255,0.55)"
+            color = "rgba(255,255,255,0.70)"
             edge_type = "course_to_course"
-        # Arco que conecta un nodo puente con un estudiante: visible
+        # Arco entre estudiante y nodo puente: bien visible
         elif (src_bridge and tgt_course) or (src_course and tgt_bridge):
-            color = "rgba(255,255,255,0.18)"
+            color = "rgba(180,160,255,0.30)"
             edge_type = "bridge_to_course"
-        # Arco entre dos nodos puente: semivisible
+        # Arco entre dos nodos puente
         elif src_bridge and tgt_bridge:
-            color = "rgba(255,255,255,0.08)"
+            color = "rgba(255,255,255,0.10)"
             edge_type = "bridge_to_bridge"
+        # Arco donde al menos un extremo es estudiante pero el otro es externo
+        elif src_course or tgt_course:
+            color = "rgba(100,150,255,0.22)"
+            edge_type = "course_to_external"
         else:
-            color = "rgba(255,255,255,0.015)"
+            color = "rgba(255,255,255,0.012)"
             edge_type = "external"
 
         sigma_edges.append({
